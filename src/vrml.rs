@@ -14,6 +14,7 @@
 use std::fs::File;
 use std::io::{BufReader, BufWriter, ErrorKind, Read, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::fixed::{format_fixed_as_decimal, parse_decimal_fixed};
 use crate::format::fmt_bytes;
@@ -21,6 +22,11 @@ use crate::import::ImportOptions;
 use crate::tmp::TmpGuard;
 
 type Res<T> = Result<T, Box<dyn std::error::Error>>;
+
+/// Makes every spool file name unique within this process; the pid separates processes.
+/// A per-shape counter is not enough: several conversions can run concurrently in one process
+/// (Cargo's test harness does exactly that), and each would claim shape 1.
+static SPOOL_SEQ: AtomicU64 = AtomicU64::new(0);
 
 // ── lexer ────────────────────────────────────────────────────────────────────
 
@@ -308,7 +314,6 @@ struct Warned {
 /// either already written to the output or spooled to disk.
 struct Shape {
     name: String,
-    index: usize,
     v_base: u64,
     vt_base: u64,
     vn_base: u64,
@@ -424,7 +429,6 @@ pub fn convert(opts: &ImportOptions) -> Res<()> {
                     writeln!(out, "o {}", name)?;
                     shape = Some(Shape {
                         name,
-                        index: shape_count,
                         v_base: v_total,
                         vt_base: vt_total,
                         vn_base: vn_total,
@@ -621,7 +625,7 @@ fn read_array(
                 let name = format!(
                     "objtools_import_{}_{}_{}.bin",
                     std::process::id(),
-                    s.index,
+                    SPOOL_SEQ.fetch_add(1, Ordering::Relaxed),
                     suffix
                 );
                 *slot = Some(Spool::create(tmp_dir, &name, guard)?);
