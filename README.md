@@ -1,34 +1,26 @@
 # objtools
 
-Command-line tools for **very large** Wavefront OBJ files — files that are several times
-bigger than the machine's RAM and swap combined.
+Command-line tools to manipulate Wavefront OBJ files. Designed to accomodate very large file on human-sized computers. It can be used to split an OBj file into its constituent models, center georeferenced coordinates or just analyze the content of a file.
 
-Every subcommand reads its input as a stream, one line at a time, and never holds the mesh
-in memory. A 400 GB OBJ is processed with the same memory footprint as a 400 kB one.
+Every subcommand reads its input as a stream, one line at a time, and never holds more data than it has to to achieve low resource usage and good speed.
 
 ```
 $ objtools inspect model.obj
 ┌─ 2 objects
 ├── 「Cube」
 │     ├─ 4 vertices
-│     └─ 2 materials: Wood, Metal
+│     ├─ 2 materials: Wood, Metal
+│     └─ bounds 0 0 0 → 1 1 0
 └── 「Sphere」
       ├─ 3 vertices
-      └─ 1 material: Glass
+      ├─ 1 material: Glass
+      └─ bounds 2 0 0 → 3 1 0
+
+   total   7 vertices in 2 objects
+   bounds  0 0 0 → 3 1 0
+   size    3 × 1 × 0
+   center  1.5 0.5 0
 ```
-
-## Goals
-
-- **Never OOM.** Whatever the input size, the tool must complete. No full-mesh buffering, no
-  memory-mapping the whole file, no "load then query".
-- **Metadata first.** Answer *what is in this file?* — object names, per-object vertex counts,
-  per-object material lists — in a single pass over the bytes.
-- **Useful transforms on the way.** Splitting a monolithic OBJ into per-object files and
-  re-centering a georeferenced mesh are the two operations that otherwise force you to open the
-  file in a DCC tool that cannot load it.
-- **No precision loss.** Georeferenced meshes carry coordinates in the millions of metres with
-  sub-millimetre detail. Round-tripping those through `f32`, or even naively through `f64`,
-  visibly destroys the model.
 
 ## Installation
 
@@ -70,15 +62,31 @@ objtools inspect --progress model.obj  # progress on stderr every 100 MB
 ```json
 {
   "total_objects": 2,
+  "total_vertices": 7,
+  "bounding_box": {
+    "min":    ["0", "0", "0"],
+    "max":    ["3", "1", "0"],
+    "size":   ["3", "1", "0"],
+    "center": ["1.5", "0.5", "0"]
+  },
   "objects": [
-    { "name": "Cube",   "vertex_count": 4, "materials": ["Wood", "Metal"] },
-    { "name": "Sphere", "vertex_count": 3, "materials": ["Glass"] }
+    {
+      "name": "Cube",
+      "vertex_count": 4,
+      "materials": ["Wood", "Metal"],
+      "bounding_box": { "min": ["0", "0", "0"], "max": ["1", "1", "0"], "…": [] }
+    }
   ]
 }
 ```
 
 Vertices are attributed to the `o` group they are declared under. A file with geometry before
 any `o` line reports it under the name `(default)`.
+
+Bounding-box coordinates are emitted as decimal **strings**, not JSON numbers. A georeferenced
+coordinate carries more significant digits than a JSON number survives in most parsers, and
+quietly rounding them here would defeat the point of the fixed-point pipeline described below.
+An object with no vertices reports no bounds rather than a box collapsed on the origin.
 
 ### `split`
 
@@ -107,27 +115,48 @@ collisions get a `_2`, `_3`, … suffix rather than overwriting.
 
 ### `translate`
 
-Subtracts a fixed origin from every vertex, so a mesh authored in projected world coordinates
+Subtracts a chosen origin from every vertex, so a mesh authored in projected world coordinates
 (Lambert-93, UTM…) ends up near `0 0 0` where renderers keep their precision.
 
 ```sh
-objtools translate model.obj -o centered.obj                     # origin = first vertex
+objtools translate --center model.obj -o centered.obj            # origin = bounding-box center
 objtools translate --origin 651000,6862000,120 model.obj -o centered.obj
 objtools translate --origin 651000 6862000 120 model.obj         # to stdout
+objtools translate model.obj -o centered.obj                     # origin = first vertex
 ```
 
-With no `--origin`, the first `v` line encountered becomes the origin and is echoed on stderr,
-so the same value can be reused later — for instance to translate sibling files by exactly the
-same amount. Non-vertex lines are passed through untouched.
+There are three ways to pick the origin:
+
+| Mode | Origin | Passes |
+| --- | --- | --- |
+| `--center` | Center of the model's bounding box. | 2 |
+| `--origin X,Y,Z` | Exactly what you give it. | 1 |
+| *(default)* | The first `v` line in the file. | 1 |
+
+`--center` is usually what you want: it puts the model's actual middle on the origin, which the
+first vertex only does by accident. It costs a first streaming pass to measure the bounding box —
+still constant memory, just twice the reading. `--center` and `--origin` are mutually exclusive,
+and centering a file with no vertices is an error rather than a silent copy.
+
+Whichever mode is used, the origin is echoed on stderr, so the same value can be fed back through
+`--origin` later — for instance to translate sibling files by exactly the same amount, or to
+translate the geometry of a scene one object at a time. Non-vertex lines are passed through
+untouched.
 
 ## Design
 
 ### Streaming, always
 
-`inspect` and `translate` are pure single-pass streamers: a 64 kB `BufReader`, a line at a time,
-constant memory. `inspect` retains only the accumulated per-object records — a few hundred bytes
-per object, so even a file with a million objects stays well under a gigabyte. `translate` retains
+`inspect` and `translate` are line-at-a-time streamers over a 64 kB `BufReader`, in constant
+memory. `inspect` retains only the accumulated per-object records — a few hundred bytes per
+object, so even a file with a million objects stays well under a gigabyte. `translate` retains
 nothing at all beyond the origin.
+
+A bounding box is six integers, so measuring one costs nothing in memory: `inspect` keeps one per
+object plus a running total, and `translate --center` keeps exactly one for its first pass. What it
+does cost is *parsing* — the default `inspect` has to turn every coordinate into a number rather
+than just counting `v` lines, which is why `parse_decimal_fixed` is written to be allocation-free
+(see below). On a 393 MB / 2.2 M-vertex file the bounding box adds roughly 30% to the wall time.
 
 Nothing ever calls `read_to_string`, and nothing memory-maps the input. That is the whole trick,
 and it is the constraint every future subcommand has to respect.
@@ -177,12 +206,18 @@ Georeferenced coordinates are the pathological case for floating point. A value 
 be subtracted away, and reformatting it through Rust's float printer does not necessarily give back
 the digits that were in the file.
 
-So `translate` never converts to `f64` at all (except for exponent-notation inputs, which fall back
-to a float parse). Decimal strings are parsed **by hand** into `i64` fixed-point with 10 fractional
-digits — a scale of 0.1 nm, with an `i64` range of ±922 million metres, comfortably covering any
-projected coordinate system. Subtraction is then exact integer arithmetic, and the result is
-formatted back to decimal with trailing zeros trimmed, so `1000001 - 1000000` prints as `1` and not
-`0.9999999999`.
+So coordinates are never converted to `f64` at all (except for exponent-notation inputs, which fall
+back to a float parse). Decimal strings are parsed **by hand** into `i64` fixed-point with 10
+fractional digits — a scale of 0.1 nm, with an `i64` range of ±922 million metres, comfortably
+covering any projected coordinate system. Subtraction is then exact integer arithmetic, and the
+result is formatted back to decimal with trailing zeros trimmed, so `1000001 - 1000000` prints as
+`1` and not `0.9999999999`.
+
+That parser (`src/fixed.rs`) runs three times per vertex, so it walks the bytes of the number
+directly and allocates nothing. The same module holds `BBox`, which is why `inspect`'s bounds,
+`translate --center`'s origin and the translation itself all agree to the last digit: the midpoint
+of the box is computed as an exact integer, widened to `i128` only so the intermediate sum cannot
+overflow.
 
 ### Why Rust
 

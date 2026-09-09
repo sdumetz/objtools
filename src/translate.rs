@@ -1,12 +1,58 @@
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 
+use crate::fixed::{
+    format_fixed_as_decimal, format_triple, parse_decimal_fixed, parse_three_fixed, BBox, SCALE,
+};
+use crate::format::fmt_bytes;
+
 pub struct TranslateOptions {
     pub file_path: String,
     pub output: Option<String>,
     pub progress: bool,
     // origin provided as three numeric strings (will be parsed inside `run`)
     pub origin: Option<[String; 3]>,
+    // compute the origin from the model's bounding box centre (adds a first pass)
+    pub center: bool,
+}
+
+/// Payload of a `v` line, or `None` if this is not one (`vt`/`vn` must not match).
+fn vertex_payload(line: &str) -> Option<&str> {
+    let rest = line.trim_start().strip_prefix('v')?;
+    if rest.starts_with(char::is_whitespace) {
+        Some(rest.trim_start())
+    } else {
+        None
+    }
+}
+
+/// First pass: stream the file and accumulate the bounding box of every vertex.
+/// Constant memory, like everything else here — only six integers are retained.
+fn scan_bbox(file_path: &str, progress: bool) -> Result<BBox, Box<dyn std::error::Error>> {
+    let input = File::open(file_path).map_err(|e| format!("{}: {}", file_path, e))?;
+    let reader = BufReader::with_capacity(64 * 1024, input);
+
+    let mut bbox = BBox::new();
+    let mut bytes_read: u64 = 0;
+    let mut next_progress: u64 = 100_000_000;
+
+    for line_res in reader.lines() {
+        let line = line_res?;
+        bytes_read += line.len() as u64 + 1;
+        if progress && bytes_read >= next_progress {
+            next_progress = bytes_read + 100_000_000;
+            eprintln!("Pass 1 (bounding box): read {}", fmt_bytes(bytes_read));
+        }
+        if let Some(rest) = vertex_payload(&line) {
+            // A malformed vertex is passed through untouched by pass 2, so it must not
+            // abort the scan either.
+            if let Ok(coords) = parse_three_fixed(rest) {
+                bbox.add(coords);
+            }
+        }
+    }
+
+    Ok(bbox)
 }
 
 
@@ -20,25 +66,36 @@ pub fn run(opts: TranslateOptions) -> Result<(), Box<dyn std::error::Error>> {
     };
     let mut out = out;
 
-    let mut first_found: Option<[i64; 3]> = None; // reference point in fixed units (1e-10 m)
+    // Reference point in fixed units (1e-10 m). Left as None to mean "use the first vertex".
+    let mut first_found: Option<[i64; 3]> = None;
 
-    // If origin was provided via options (strings), parse them now into fixed-point
     if let Some(origin_strs) = &opts.origin {
-        let a = parse_decimal_fixed(&origin_strs[0])?;
-        let b = parse_decimal_fixed(&origin_strs[1])?;
-        let c = parse_decimal_fixed(&origin_strs[2])?;
-        first_found = Some([a, b, c]);
-        let coords = first_found.unwrap();
-        let rx = format_fixed_as_decimal(coords[0]);
-        let ry = format_fixed_as_decimal(coords[1]);
-        let rz = format_fixed_as_decimal(coords[2]);
-        let fx = coords[0] as f64 / 10_000_000_000.0;
-        let fy = coords[1] as f64 / 10_000_000_000.0;
-        let fz = coords[2] as f64 / 10_000_000_000.0;
-        let mag = (fx * fx + fy * fy + fz * fz).sqrt();
+        let coords = [
+            parse_decimal_fixed(&origin_strs[0])?,
+            parse_decimal_fixed(&origin_strs[1])?,
+            parse_decimal_fixed(&origin_strs[2])?,
+        ];
+        first_found = Some(coords);
         eprintln!(
-            "Using provided origin: {} {} {} m — translation magnitude: {:.10} m",
-            rx, ry, rz, mag
+            "Using provided origin: {} m — translation magnitude: {:.10} m",
+            format_triple(coords),
+            magnitude(coords)
+        );
+    } else if opts.center {
+        let bbox = scan_bbox(&opts.file_path, opts.progress)?;
+        let coords = bbox
+            .center()
+            .ok_or_else(|| format!("{}: no vertices found, nothing to center", opts.file_path))?;
+        eprintln!(
+            "Bounding box: {} m ({} m)",
+            bbox.range_str().unwrap_or_default(),
+            bbox.size_str().unwrap_or_default()
+        );
+        first_found = Some(coords);
+        eprintln!(
+            "Using bounding-box center as origin: {} m — translation magnitude: {:.10} m",
+            format_triple(coords),
+            magnitude(coords)
         );
     }
 
@@ -54,22 +111,12 @@ pub fn run(opts: TranslateOptions) -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // Preserve original line endings/whitespace except for vertex translation
-        let trimmed_start = line.trim_start();
-        if trimmed_start.starts_with('v') && trimmed_start.split_whitespace().next() == Some("v") {
-            // parse rest
-            let rest = trimmed_start.get(1..).unwrap_or("").trim_start();
+        if let Some(rest) = vertex_payload(&line) {
             match parse_three_fixed(rest) {
                 Ok(coords) => {
                     if first_found.is_none() {
                         first_found = Some(coords);
-                        // Log the reference point
-                        let rx = format_fixed_as_decimal(coords[0]);
-                        let ry = format_fixed_as_decimal(coords[1]);
-                        let rz = format_fixed_as_decimal(coords[2]);
-                        eprintln!(
-                            "Reference point: {} {} {} m",
-                            rx, ry, rz
-                        );
+                        eprintln!("Reference point: {} m", format_triple(coords));
                     }
                     let refpt = first_found.unwrap();
                     let dx = coords[0] - refpt[0];
@@ -96,86 +143,11 @@ pub fn run(opts: TranslateOptions) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 
-// Parse three whitespace-separated decimal numbers into fixed-point (i64) with 10 decimal places
-fn parse_three_fixed(s: &str) -> Result<[i64; 3], Box<dyn std::error::Error>> {
-    let mut it = s.split_whitespace();
-    let x = it.next().ok_or("missing x")?;
-    let y = it.next().ok_or("missing y")?;
-    let z = it.next().ok_or("missing z")?;
-    Ok([
-        parse_decimal_fixed(x)?,
-        parse_decimal_fixed(y)?,
-        parse_decimal_fixed(z)?,
-    ])
-}
-
-// Parse a decimal string into fixed-point i64 with 10 decimal places, attempting exact parsing
-fn parse_decimal_fixed(s: &str) -> Result<i64, Box<dyn std::error::Error>> {
-    let s = s.trim();
-    if s.is_empty() { return Err("empty".into()); }
-
-    // quick path: if contains 'e' or 'E', fall back to f64
-    if s.contains('e') || s.contains('E') {
-        let f: f64 = s.parse()?;
-        let val = (f * 10_000_000_000.0).round();
-        return Ok(val as i64);
-    }
-
-    // manual parse: sign, integer part, fractional part
-    let (neg, body) = if s.starts_with('-') { (true, &s[1..]) } else if s.starts_with('+') { (false, &s[1..]) } else { (false, s) };
-    let mut parts = body.splitn(2, '.');
-    let int_part = parts.next().unwrap_or("");
-    let frac_part = parts.next().unwrap_or("");
-
-    let int_val: i128 = if int_part.is_empty() { 0 } else { int_part.parse::<i128>()? };
-
-    // take up to 11 fractional digits to round to 10
-    let mut frac_digits = frac_part.chars().filter(|c| c.is_ascii_digit()).collect::<String>();
-    if frac_digits.len() < 11 {
-        while frac_digits.len() < 11 { frac_digits.push('0'); }
-    }
-    if frac_digits.len() > 11 {
-        frac_digits.truncate(11);
-    }
-
-    // extract first 10 and the 11th for rounding
-    let first10 = &frac_digits[0..10];
-    let round_digit = frac_digits.chars().nth(10).unwrap_or('0');
-    let mut frac_val: i128 = first10.parse::<i128>().unwrap_or(0);
-    if round_digit >= '5' {
-        frac_val += 1;
-        if frac_val >= 10_000_000_000i128 {
-            frac_val = 0;
-            let carried = int_val + 1;
-            let mut total = carried * 10_000_000_000i128 + frac_val;
-            if neg { total = -total; }
-            return Ok(total as i64);
-        }
-    }
-
-    let mut total = int_val * 10_000_000_000i128 + frac_val;
-    if neg { total = -total; }
-    Ok(total as i64)
-}
-fn format_fixed_as_decimal(val: i64) -> String {
-    // Format fixed-point value (scale = 1e10) and trim trailing zeros.
-    if val == 0 { return "0".to_string(); }
-    let neg = val < 0;
-    let a = if neg { (-val) as i128 } else { val as i128 };
-    let intp = (a / 10_000_000_000i128) as i128;
-    let frac = (a % 10_000_000_000i128) as i128;
-    if frac == 0 {
-        if neg { format!("-{}", intp) } else { format!("{}", intp) }
-    } else {
-        let mut frac_s = format!("{:010}", frac);
-        // trim trailing zeros
-        while frac_s.ends_with('0') { frac_s.pop(); }
-        if neg {
-            format!("-{}.{}", intp, frac_s)
-        } else {
-            format!("{}.{}", intp, frac_s)
-        }
-    }
+/// Distance from the origin, in metres. Only ever used for the human-readable log line, so an
+/// f64 is fine here.
+fn magnitude(coords: [i64; 3]) -> f64 {
+    let c = |v: i64| v as f64 / SCALE as f64;
+    (c(coords[0]).powi(2) + c(coords[1]).powi(2) + c(coords[2]).powi(2)).sqrt()
 }
 
 #[cfg(test)]
@@ -210,6 +182,7 @@ mod tests {
             output: Some(output_path.to_string_lossy().into_owned()),
             progress: false,
             origin: None,
+            center: false,
         };
 
         run(opts).expect("translate run");
@@ -230,5 +203,60 @@ mod tests {
         // cleanup
         let _ = std::fs::remove_file(&input_path);
         let _ = std::fs::remove_file(&output_path);
+    }
+
+    #[test]
+    fn translate_center_uses_bounding_box_midpoint() {
+        let input_path = make_temp_path("center_in.obj");
+        let output_path = make_temp_path("center_out.obj");
+
+        let mut f = File::create(&input_path).expect("create input");
+        // Deliberately not sorted, and the first vertex is not the centre, so a pass that
+        // anchored on the first vertex would give a different answer.
+        writeln!(f, "v 1000010 2000000 3000000").unwrap();
+        writeln!(f, "vn 0 0 1").unwrap();
+        writeln!(f, "v 1000000 2000004 3000000").unwrap();
+        writeln!(f, "v 1000020 2000000 3000000").unwrap();
+        f.flush().unwrap();
+
+        let opts = TranslateOptions {
+            file_path: input_path.to_string_lossy().into_owned(),
+            output: Some(output_path.to_string_lossy().into_owned()),
+            progress: false,
+            origin: None,
+            center: true,
+        };
+        run(opts).expect("translate run");
+
+        // bbox is 1000000..1000020, 2000000..2000004, 3000000..3000000
+        // => centre 1000010 2000002 3000000
+        let out = read_to_string(&output_path).expect("read output");
+        let v: Vec<&str> = out.lines().filter(|l| l.starts_with("v ")).collect();
+        assert_eq!(v, vec!["v 0 -2 0", "v -10 2 0", "v 10 -2 0"]);
+        // non-vertex lines pass through, and `vn` is not mistaken for `v`
+        assert!(out.lines().any(|l| l == "vn 0 0 1"));
+
+        let _ = std::fs::remove_file(&input_path);
+        let _ = std::fs::remove_file(&output_path);
+    }
+
+    #[test]
+    fn translate_center_rejects_a_file_with_no_vertices() {
+        let input_path = make_temp_path("empty_in.obj");
+        let mut f = File::create(&input_path).expect("create input");
+        writeln!(f, "# nothing but a comment").unwrap();
+        f.flush().unwrap();
+
+        let opts = TranslateOptions {
+            file_path: input_path.to_string_lossy().into_owned(),
+            output: Some(make_temp_path("empty_out.obj").to_string_lossy().into_owned()),
+            progress: false,
+            origin: None,
+            center: true,
+        };
+        let err = run(opts).expect_err("should refuse to centre an empty file");
+        assert!(err.to_string().contains("no vertices"), "{}", err);
+
+        let _ = std::fs::remove_file(&input_path);
     }
 }

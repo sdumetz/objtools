@@ -1,3 +1,4 @@
+mod fixed;
 mod format;
 mod inspect;
 mod split;
@@ -50,7 +51,8 @@ fn run_inspect(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                     "Usage: objtools inspect [OPTIONS] <file.obj>\n",
                     "\n",
                     "Extract metadata from a Wavefront OBJ file in a single streaming pass.\n",
-                    "Outputs the list of objects with their vertex counts and materials.\n",
+                    "Outputs the list of objects with their vertex counts, materials and\n",
+                    "bounding boxes, plus a whole-file total.\n",
                     "\n",
                     "Options:\n",
                     "  -h, --help      Show this help message and exit\n",
@@ -149,6 +151,7 @@ fn run_translate(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     let mut output: Option<String> = None;
     let mut progress = false;
     let mut origin_fixed: Option<[String;3]> = None;
+    let mut center = false;
     let mut it = args.into_iter().peekable();
 
     while let Some(arg) = it.next() {
@@ -157,12 +160,16 @@ fn run_translate(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 print!(concat!(
                     "Usage: objtools translate [OPTIONS] <file.obj>\n",
                     "\n",
-                    "Translate a georeferenced OBJ by subtracting the first vertex\n",
+                    "Translate a georeferenced OBJ so that a chosen origin lands on 0 0 0.\n",
+                    "By default the origin is the first vertex in the file.\n",
+                    "\n",
                     "Options:\n",
                     "  -h, --help        Show this help message and exit\n",
                     "  -o, --output FILE Write translated OBJ to FILE (default: stdout)\n",
                     "      --progress    Print progress to stderr every 100 MB read\n",
                     "      --origin X,Y,Z Provide origin coordinates (comma-separated) or pass three values\n",
+                    "      --center      Use the model's bounding-box center as the origin.\n",
+                    "                    Reads the file twice: once to measure, once to write.\n",
                 ));
                 return Ok(());
             }
@@ -170,6 +177,7 @@ fn run_translate(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 output = Some(it.next().ok_or("--output requires a value")?);
             }
             "--progress" => progress = true,
+            "--center" => center = true,
             "--origin" => {
                 let token = it.next().ok_or("--origin requires values")?;
                 let parts: Vec<&str> = token.split(',').collect();
@@ -199,5 +207,15 @@ fn run_translate(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
 
     let file_path = file_path.ok_or("Missing input file. Run with --help for details.")?;
 
-    translate::run(translate::TranslateOptions { file_path, output, progress, origin: origin_fixed })
+    if center && origin_fixed.is_some() {
+        return Err("--center and --origin are mutually exclusive: --center computes the origin.".into());
+    }
+
+    translate::run(translate::TranslateOptions {
+        file_path,
+        output,
+        progress,
+        origin: origin_fixed,
+        center,
+    })
 }
