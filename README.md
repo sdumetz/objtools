@@ -1,6 +1,6 @@
 # objtools
 
-Command-line tools to manipulate Wavefront OBJ files. Designed to accomodate very large file on human-sized computers. It can be used to split an OBj file into its constituent models, center georeferenced coordinates or just analyze the content of a file.
+Command-line tools to manipulate Wavefront OBJ files. Designed to accomodate very large file on human-sized computers. It can be used to import a mesh from another format, split an OBj file into its constituent models, center georeferenced coordinates or just analyze the content of a file.
 
 Every subcommand reads its input as a stream, one line at a time, and never holds more data than it has to to achieve low resource usage and good speed.
 
@@ -37,16 +37,56 @@ cargo build --release
 ## Usage
 
 ```
-objtools <subcommand> [OPTIONS] <file.obj>
+objtools <subcommand> [OPTIONS] <file>
 
 Subcommands:
-  inspect    Extract metadata (object names, vertex counts, materials)
+  import     Convert another mesh format (.wrl) into OBJ
+  inspect    Extract metadata (object names, vertex counts, materials, bounds)
   split      Partition a large OBJ into per-object output files
   translate  Translate a georeferenced OBJ file without loss of precision
 ```
 
 Every subcommand accepts `--help`, and `--progress` to report advancement on stderr while
 chewing through a large file.
+
+### `import`
+
+Converts a mesh in another format into OBJ. The input format is chosen by file extension.
+
+Supports VRML (`.wrl`) files, more should be added when needed.
+
+```sh
+objtools import model.wrl -o model.obj    # also writes model.mtl
+objtools import model.wrl                 # OBJ on stdout, no .mtl
+objtools import --progress model.wrl -o model.obj
+```
+
+| Option | Effect |
+| --- | --- |
+| `-o, --output FILE` | Write the OBJ to `FILE`, and a sibling `.mtl` for the material. Without it the OBJ goes to stdout and no `.mtl` is produced. |
+| `--tmp-dir <DIR>` | Where to put the index spool files (default: OS temp dir). |
+| `--keep-tmp` | Keep the spool files, for debugging. |
+| `--progress` | Report progress on stderr every 100 MB read. |
+
+Each VRML `Shape` becomes an OBJ object, named after its `DEF` name where it has one and
+`shape_1`, `shape_2`, … otherwise. `Material` and `ImageTexture` become a `usemtl`/`newmtl` pair
+carrying `Kd`, `Ks`, `Ns`, `d` and `map_Kd`. Coordinates go through the same fixed-point path as
+`translate`, so a georeferenced model converts **without losing a digit**.
+
+What is read: `IndexedFaceSet` geometry — `coord`/`Coordinate`, `texCoord`/`TextureCoordinate`,
+`normal`/`Normal` and the `coordIndex` / `texCoordIndex` / `normalIndex` arrays, in whatever order
+the file declares them. Per VRML's rules an absent `texCoordIndex` falls back to `coordIndex`.
+Polygons are passed through as n-gons rather than triangulated. The VRML 1.0 spellings
+`Coordinate3` and `TextureCoordinate2` are accepted.
+
+What is **not** read. Each of these warns on stderr rather than failing, so a conversion never
+silently loses something without saying so:
+
+- **Per-vertex colours** (`Color` nodes) are dropped — OBJ has no standard way to carry them.
+- **`Transform` translation/scale** is not applied; the output keeps the raw coordinates. A
+  non-identity transform produces a warning so it cannot pass unnoticed.
+- `Switch`, `LOD`, `Billboard`, `Extrusion`, `ElevationGrid` and the other non-`IndexedFaceSet`
+  geometry nodes are skipped, as is `USE` node reuse.
 
 ### `inspect`
 
@@ -161,6 +201,26 @@ than just counting `v` lines, which is why `parse_decimal_fixed` is written to b
 Nothing ever calls `read_to_string`, and nothing memory-maps the input. That is the whole trick,
 and it is the constraint every future subcommand has to respect.
 
+### `import`: spooling the index arrays
+
+VRML stores a face's position indices and its texture-coordinate indices in two separate arrays
+(`coordIndex`, `texCoordIndex`) that pair up positionally, and it is free to declare them in
+either order — the sample file this was built against puts `texCoordIndex` first. OBJ wants the
+two woven together on a single `f` line, so the converter cannot emit a face until it has seen
+every index array of that `Shape`.
+
+Keeping them in memory is exactly what this project refuses to do, so each index array is spooled
+to a fixed-width binary temp file as it streams past (little-endian `i32`, VRML's `-1` face
+terminators kept inline). At the end of each `Shape` the spools are replayed in lockstep and the
+`f` lines are written. Vertices, texture coordinates and normals need no spool at all: they are
+written to the OBJ as they are parsed, which also happens to put them ahead of the faces that
+reference them, exactly where OBJ wants them.
+
+The reader underneath is a byte-level scanner rather than a line reader — VRML arrays run to
+millions of tokens spread arbitrarily across lines, so there are no line boundaries worth
+respecting. Converting a 228 MB `.wrl` (1.05 M vertices, 2.10 M faces) runs in about ten seconds
+and completes unchanged under a 64 MB address-space cap.
+
 ### `split`: two passes with binary side files
 
 Splitting cannot be done in one pass. Faces reference vertices by global index and OBJ allows a
@@ -213,7 +273,9 @@ covering any projected coordinate system. Subtraction is then exact integer arit
 result is formatted back to decimal with trailing zeros trimmed, so `1000001 - 1000000` prints as
 `1` and not `0.9999999999`.
 
-That parser (`src/fixed.rs`) runs three times per vertex, so it walks the bytes of the number
+All three of `inspect`, `translate` and `import` share this path, which is why a `.wrl` can be
+converted, centered and measured without any stage rounding the coordinates the previous one
+produced. That parser (`src/fixed.rs`) runs three times per vertex, so it walks the bytes of the number
 directly and allocates nothing. The same module holds `BBox`, which is why `inspect`'s bounds,
 `translate --center`'s origin and the translation itself all agree to the last digit: the midpoint
 of the box is computed as an exact integer, widened to `i128` only so the intermediate sum cannot

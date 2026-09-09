@@ -5,6 +5,9 @@
 /out
 
 # Large sample meshes and their assets are kept out of the repository
+/files
+*.wrl
+*.jpg
 *.obj
 *.mtl
 *.png

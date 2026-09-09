@@ -4,6 +4,7 @@ use std::io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use crate::format::fmt_bytes;
+use crate::tmp::TmpGuard;
 
 pub struct SplitOptions {
     pub file_path: String,
@@ -36,31 +37,6 @@ fn unique_path(used: &mut HashSet<PathBuf>, base: &Path) -> PathBuf {
             return candidate;
         }
         i += 1;
-    }
-}
-
-// ── temp-file guard ──────────────────────────────────────────────────────────
-
-struct TmpGuard {
-    paths: Vec<PathBuf>,
-    keep: bool,
-}
-
-impl TmpGuard {
-    fn new(keep: bool) -> Self { Self { paths: Vec::new(), keep } }
-    fn track(&mut self, p: PathBuf) -> &PathBuf {
-        self.paths.push(p);
-        self.paths.last().unwrap()
-    }
-}
-
-impl Drop for TmpGuard {
-    fn drop(&mut self) {
-        if !self.keep {
-            for p in &self.paths {
-                let _ = std::fs::remove_file(p);
-            }
-        }
     }
 }
 

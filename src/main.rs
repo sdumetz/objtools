@@ -1,8 +1,11 @@
 mod fixed;
 mod format;
+mod import;
 mod inspect;
 mod split;
+mod tmp;
 mod translate;
+mod vrml;
 
 use std::env;
 use std::path::PathBuf;
@@ -13,12 +16,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // top-level --help / -h / no args
     if args.is_empty() || args[0] == "--help" || args[0] == "-h" {
         print!(concat!(
-            "Usage: objtools <subcommand> [OPTIONS] <file.obj>\n",
+            "Usage: objtools <subcommand> [OPTIONS] <file>\n",
             "\n",
             "Subcommands:\n",
-            "  inspect   Extract metadata (object names, vertex counts, materials)\n",
+            "  import    Convert another mesh format (.wrl) into OBJ\n",
+            "  inspect   Extract metadata (object names, vertex counts, materials, bounds)\n",
             "  split     Partition a large OBJ into per-object output files\n",
-            "  translate Translate a Georeferenced OBJ file without loss of precision",
+            "  translate Translate a Georeferenced OBJ file without loss of precision\n",
             "\n",
             "Run `objtools <subcommand> --help` for subcommand-specific options.\n",
         ));
@@ -27,6 +31,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let subcmd = args.remove(0);
     match subcmd.as_str() {
+        "import" => run_import(args),
         "inspect" => run_inspect(args),
         "split"   => run_split(args),
         "translate" => run_translate(args),
@@ -35,6 +40,56 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::process::exit(1);
         }
     }
+}
+
+fn run_import(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+    let mut file_path: Option<String> = None;
+    let mut output: Option<String> = None;
+    let mut tmp_dir: Option<PathBuf> = None;
+    let mut keep_tmp = false;
+    let mut progress = false;
+    let mut it = args.into_iter().peekable();
+
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--help" | "-h" => {
+                print!(concat!(
+                    "Usage: objtools import [OPTIONS] <file.wrl>\n",
+                    "\n",
+                    "Convert another mesh format into Wavefront OBJ, streaming.\n",
+                    "Supported input: .wrl (VRML 97 IndexedFaceSet geometry).\n",
+                    "\n",
+                    "Coordinates are carried through the fixed-point parser, so a georeferenced\n",
+                    "model converts without losing a digit. With -o, a sibling .mtl is written\n",
+                    "alongside the .obj for the model's material and texture.\n",
+                    "\n",
+                    "Options:\n",
+                    "  -h, --help        Show this help message and exit\n",
+                    "  -o, --output FILE Write the OBJ to FILE (default: stdout, no .mtl)\n",
+                    "      --tmp-dir DIR Directory for the index spool files (default: OS temp dir)\n",
+                    "      --keep-tmp    Do not delete the spool files after completion\n",
+                    "      --progress    Print progress to stderr every 100 MB read\n",
+                ));
+                return Ok(());
+            }
+            "-o" | "--output" => {
+                output = Some(it.next().ok_or("--output requires a value")?);
+            }
+            "--tmp-dir" => {
+                tmp_dir = Some(PathBuf::from(it.next().ok_or("--tmp-dir requires a value")?));
+            }
+            "--keep-tmp" => keep_tmp = true,
+            "--progress" => progress = true,
+            other => {
+                if file_path.is_none() { file_path = Some(other.to_string()); }
+            }
+        }
+    }
+
+    let file_path = file_path.ok_or("Missing input file. Run with --help for details.")?;
+    let tmp_dir = tmp_dir.unwrap_or_else(std::env::temp_dir);
+
+    import::run(import::ImportOptions { file_path, output, tmp_dir, keep_tmp, progress })
 }
 
 fn run_inspect(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
