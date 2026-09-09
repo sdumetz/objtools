@@ -1,0 +1,203 @@
+mod format;
+mod inspect;
+mod split;
+mod translate;
+
+use std::env;
+use std::path::PathBuf;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut args: Vec<String> = env::args().skip(1).collect();
+
+    // top-level --help / -h / no args
+    if args.is_empty() || args[0] == "--help" || args[0] == "-h" {
+        print!(concat!(
+            "Usage: objtools <subcommand> [OPTIONS] <file.obj>\n",
+            "\n",
+            "Subcommands:\n",
+            "  inspect   Extract metadata (object names, vertex counts, materials)\n",
+            "  split     Partition a large OBJ into per-object output files\n",
+            "  translate Translate a Georeferenced OBJ file without loss of precision",
+            "\n",
+            "Run `objtools <subcommand> --help` for subcommand-specific options.\n",
+        ));
+        return Ok(());
+    }
+
+    let subcmd = args.remove(0);
+    match subcmd.as_str() {
+        "inspect" => run_inspect(args),
+        "split"   => run_split(args),
+        "translate" => run_translate(args),
+        other => {
+            eprintln!("Unknown subcommand: {}. Run with --help for usage.", other);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn run_inspect(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+    let mut file_path: Option<String> = None;
+    let mut json = false;
+    let mut compact = false;
+    let mut progress = false;
+    let mut it = args.into_iter().peekable();
+
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--help" | "-h" => {
+                print!(concat!(
+                    "Usage: objtools inspect [OPTIONS] <file.obj>\n",
+                    "\n",
+                    "Extract metadata from a Wavefront OBJ file in a single streaming pass.\n",
+                    "Outputs the list of objects with their vertex counts and materials.\n",
+                    "\n",
+                    "Options:\n",
+                    "  -h, --help      Show this help message and exit\n",
+                    "      --json      Output as pretty-printed JSON instead of human-readable text\n",
+                    "      --compact   Output as compact single-line JSON (implies --json)\n",
+                    "      --progress  Print progress to stderr every 100 MB read\n",
+                ));
+                return Ok(());
+            }
+            "--json"    => json = true,
+            "--compact" => { json = true; compact = true; }
+            "--progress" => progress = true,
+            other => {
+                if file_path.is_none() { file_path = Some(other.to_string()); }
+            }
+        }
+    }
+
+    let file_path = match file_path {
+        Some(p) => p,
+        None => {
+            eprintln!("Usage: objtools inspect [OPTIONS] <file.obj>\nRun with --help for details.");
+            std::process::exit(1);
+        }
+    };
+
+    inspect::run(inspect::InspectOptions { file_path, json, compact, progress })
+}
+
+fn run_split(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+    let mut file_path: Option<String> = None;
+    let mut output_dir: Option<PathBuf> = None;
+    let mut by_material = false;
+    let mut tmp_dir: Option<PathBuf> = None;
+    let mut keep_tmp = false;
+    let mut progress = false;
+    let mut it = args.into_iter().peekable();
+
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--help" | "-h" => {
+                print!(concat!(
+                    "Usage: objtools split [OPTIONS] --output-dir <DIR> <file.obj>\n",
+                    "\n",
+                    "Partition a large OBJ file into per-object output .obj files.\n",
+                    "Uses a two-pass algorithm with binary temp files for random vertex access.\n",
+                    "\n",
+                    "Options:\n",
+                    "  --output-dir <DIR>   Directory for output .obj files (required, must exist)\n",
+                    "  --by-material        Split by object × material instead of object only\n",
+                    "  --tmp-dir <DIR>      Directory for binary temp files (default: OS temp dir)\n",
+                    "  --keep-tmp           Do not delete temp files after completion\n",
+                    "  --progress           Print progress to stderr (pass 1: every 100 MB; pass 2: per group)\n",
+                    "  -h, --help           Show this help and exit\n",
+                ));
+                return Ok(());
+            }
+            "--output-dir" => {
+                output_dir = Some(PathBuf::from(it.next().ok_or("--output-dir requires a value")?));
+            }
+            "--by-material" => by_material = true,
+            "--tmp-dir" => {
+                tmp_dir = Some(PathBuf::from(it.next().ok_or("--tmp-dir requires a value")?));
+            }
+            "--keep-tmp" => keep_tmp = true,
+            "--progress" => progress = true,
+            other => {
+                if file_path.is_none() { file_path = Some(other.to_string()); }
+            }
+        }
+    }
+
+    let file_path = file_path.ok_or("Missing input file. Run with --help for details.")?;
+    let output_dir = output_dir.ok_or("--output-dir is required. Run with --help for details.")?;
+
+    if !output_dir.exists() {
+        return Err(format!("Output directory does not exist: {}", output_dir.display()).into());
+    }
+
+    let tmp_dir = tmp_dir.unwrap_or_else(std::env::temp_dir);
+
+    split::run(split::SplitOptions {
+        file_path,
+        output_dir,
+        by_material,
+        tmp_dir,
+        keep_tmp,
+        progress,
+    })
+}
+
+
+
+fn run_translate(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+    let mut file_path: Option<String> = None;
+    let mut output: Option<String> = None;
+    let mut progress = false;
+    let mut origin_fixed: Option<[String;3]> = None;
+    let mut it = args.into_iter().peekable();
+
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--help" | "-h" => {
+                print!(concat!(
+                    "Usage: objtools translate [OPTIONS] <file.obj>\n",
+                    "\n",
+                    "Translate a georeferenced OBJ by subtracting the first vertex\n",
+                    "Options:\n",
+                    "  -h, --help        Show this help message and exit\n",
+                    "  -o, --output FILE Write translated OBJ to FILE (default: stdout)\n",
+                    "      --progress    Print progress to stderr every 100 MB read\n",
+                    "      --origin X,Y,Z Provide origin coordinates (comma-separated) or pass three values\n",
+                ));
+                return Ok(());
+            }
+            "-o" | "--output" => {
+                output = Some(it.next().ok_or("--output requires a value")?);
+            }
+            "--progress" => progress = true,
+            "--origin" => {
+                let token = it.next().ok_or("--origin requires values")?;
+                let parts: Vec<&str> = token.split(',').collect();
+                if parts.len() == 3 {
+                    origin_fixed = Some([
+                        parts[0].to_string(),
+                        parts[1].to_string(),
+                        parts[2].to_string(),
+                    ]);
+                } else {
+                    // token is X, then next two tokens should be Y and Z
+                    let x = token;
+                    let y = it.next().ok_or("--origin requires three values")?;
+                    let z = it.next().ok_or("--origin requires three values")?;
+                    origin_fixed = Some([
+                        x.to_string(),
+                        y.to_string(),
+                        z.to_string(),
+                    ]);
+                }
+            }
+            other => {
+                if file_path.is_none() { file_path = Some(other.to_string()); }
+            }
+        }
+    }
+
+    let file_path = file_path.ok_or("Missing input file. Run with --help for details.")?;
+
+    translate::run(translate::TranslateOptions { file_path, output, progress, origin: origin_fixed })
+}
