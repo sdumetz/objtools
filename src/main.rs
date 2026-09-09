@@ -2,6 +2,7 @@ mod fixed;
 mod format;
 mod import;
 mod inspect;
+mod repair;
 mod split;
 mod tmp;
 mod translate;
@@ -21,6 +22,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "Subcommands:\n",
             "  import    Convert another mesh format (.wrl) into OBJ\n",
             "  inspect   Extract metadata (object names, vertex counts, materials, bounds)\n",
+            "  repair    Repair bad OBJ files (texture paths, case sensitivity, extensions)\n",
             "  split     Partition a large OBJ into per-object output files\n",
             "  translate Translate a Georeferenced OBJ file without loss of precision\n",
             "\n",
@@ -33,6 +35,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     match subcmd.as_str() {
         "import" => run_import(args),
         "inspect" => run_inspect(args),
+        "repair"  => run_repair(args),
         "split"   => run_split(args),
         "translate" => run_translate(args),
         other => {
@@ -273,4 +276,55 @@ fn run_translate(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         origin: origin_fixed,
         center,
     })
+}
+
+fn run_repair(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+    let mut file_path: Option<String> = None;
+    let mut it = args.into_iter().peekable();
+
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--help" | "-h" => {
+                print!(concat!(
+                    "Usage: objtools repair [OPTIONS] <file.obj>\n",
+                    "\n",
+                    "Repair bad OBJ files by fixing texture paths, case sensitivity, and file extensions.\n",
+                    "\n",
+                    "Options:\n",
+                    "  -h, --help           Show this help message and exit\n",
+                ));
+                return Ok(());
+            }
+            other => {
+                if file_path.is_none() { file_path = Some(other.to_string()); }
+            }
+        }
+    }
+
+    let file_path = match file_path {
+        Some(p) => p,
+        None => {
+            eprintln!("Usage: objtools repair [OPTIONS] <file.obj>\nRun with --help for details.");
+            std::process::exit(1);
+        }
+    };
+
+    let opts = repair::RepairOptions {
+        file_path,
+    };
+
+    let report = repair::run(opts)?;
+    
+    // Print summary
+    if report.success {
+        eprintln!("✅ No issues found. File is clean.");
+    } else {
+        eprintln!("❌ {} issues found. {} fixed, {} remaining.",
+            report.issues.len(),
+            report.fixed_count,
+            report.remaining_issues
+        );
+    }
+    
+    Ok(())
 }
