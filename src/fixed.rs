@@ -12,92 +12,77 @@ use serde::Serialize;
 /// An `i64` at this scale spans roughly ±9.2e8 m, which covers any projected coordinate system.
 pub const SCALE: i128 = 10_000_000_000;
 
-/// Largest integer part that can still fit an `i64` once scaled.
-const MAX_INT_PART: i128 = i64::MAX as i128 / SCALE + 1;
-
-fn to_i64(total: i128, src: &str) -> Result<i64, Box<dyn std::error::Error>> {
-    i64::try_from(total).map_err(|_| format!("coordinate out of range: {}", src).into())
-}
-
-/// Parse a decimal string into fixed-point. Exponent notation falls back to an `f64` parse.
+/// Parse decimal and scientific notation exactly, rounding to 10 fractional digits.
+/// Subtraction stays in integers until local coordinates are encoded as float32.
 pub fn parse_decimal_fixed(s: &str) -> Result<i64, Box<dyn std::error::Error>> {
     let s = s.trim();
-    if s.is_empty() {
-        return Err("empty".into());
-    }
-
-    // quick path: if contains 'e' or 'E', fall back to f64
-    if s.contains('e') || s.contains('E') {
-        let f: f64 = s.parse()?;
-        let val = (f * SCALE as f64).round();
-        return Ok(val as i64);
-    }
-
-    // Manual parse: sign, integer part, fractional part.
-    // Deliberately allocation-free — this runs three times per vertex, so on a file with a
-    // billion vertices a single String per coordinate is the difference between minutes.
-    let (neg, body) = if let Some(rest) = s.strip_prefix('-') {
-        (true, rest)
-    } else if let Some(rest) = s.strip_prefix('+') {
-        (false, rest)
+    let invalid = || format!("Invalid or out-of-range coordinate: {s}");
+    let (negative, body) = if let Some(b) = s.strip_prefix('-') {
+        (true, b)
     } else {
-        (false, s)
+        (false, s.strip_prefix('+').unwrap_or(s))
     };
-    let bytes = body.as_bytes();
-
-    let mut int_val: i128 = 0;
-    let mut i = 0;
-    while i < bytes.len() && bytes[i] != b'.' {
-        let d = bytes[i];
-        if !d.is_ascii_digit() {
-            return Err(format!("not a number: {}", s).into());
-        }
-        int_val = int_val * 10 + (d - b'0') as i128;
-        if int_val > MAX_INT_PART {
-            return Err(format!("coordinate out of range: {}", s).into());
-        }
-        i += 1;
-    }
-
-    // Take up to 11 fractional digits: ten to keep, the eleventh to round on.
-    let mut frac_val: i128 = 0;
-    let mut ndigits = 0usize;
-    let mut round_digit = b'0';
-    if i < bytes.len() {
-        for &d in &bytes[i + 1..] {
-            if !d.is_ascii_digit() {
-                continue;
+    let (mantissa, exponent) = if let Some(i) = body.find(['e', 'E']) {
+        (
+            &body[..i],
+            body[i + 1..].parse::<i64>().map_err(|_| invalid())?,
+        )
+    } else {
+        (body, 0)
+    };
+    let mut total_digits = 0usize;
+    let mut leading_zeros = 0usize;
+    let mut dot = false;
+    let mut fraction = 0i64;
+    for b in mantissa.bytes() {
+        if b == b'.' && !dot {
+            dot = true;
+        } else if b.is_ascii_digit() {
+            if total_digits == leading_zeros && b == b'0' {
+                leading_zeros += 1;
             }
-            if ndigits < 10 {
-                frac_val = frac_val * 10 + (d - b'0') as i128;
-                ndigits += 1;
-            } else {
-                round_digit = d;
-                break;
+            total_digits += 1;
+            if dot {
+                fraction += 1;
             }
+        } else {
+            return Err(invalid().into());
         }
     }
-    while ndigits < 10 {
-        frac_val *= 10;
-        ndigits += 1;
+    if total_digits == 0 {
+        return Err(invalid().into());
     }
-
-    if round_digit >= b'5' {
-        frac_val += 1;
-        if frac_val >= SCALE {
-            let mut total = (int_val + 1) * SCALE;
-            if neg {
-                total = -total;
-            }
-            return to_i64(total, s);
-        }
+    let digit_count = total_digits - leading_zeros;
+    if digit_count == 0 {
+        return Ok(0);
     }
-
-    let mut total = int_val * SCALE + frac_val;
-    if neg {
-        total = -total;
+    let shift = exponent.saturating_sub(fraction).saturating_add(10);
+    let kept = (digit_count as i64).saturating_add(shift);
+    if kept < 0 {
+        return Ok(0);
     }
-    to_i64(total, s)
+    if kept > 19 {
+        return Err(invalid().into());
+    }
+    let take = (kept as usize).min(digit_count);
+    let mut digits = mantissa
+        .bytes()
+        .filter(|b| b.is_ascii_digit())
+        .skip(leading_zeros);
+    let mut value = 0i128;
+    for b in digits.by_ref().take(take) {
+        value = value * 10 + (b - b'0') as i128;
+    }
+    for _ in take..kept as usize {
+        value *= 10;
+    }
+    if digits.next().is_some_and(|b| b >= b'5') {
+        value += 1;
+    }
+    if negative {
+        value = -value;
+    }
+    i64::try_from(value).map_err(|_| invalid().into())
 }
 
 /// Parse three whitespace-separated decimals into fixed-point.
@@ -178,6 +163,7 @@ impl BBox {
         }
     }
 
+    #[cfg(test)]
     pub fn merge(&mut self, other: &BBox) {
         if let Some((min, max)) = other.bounds {
             self.add(min);
@@ -202,7 +188,11 @@ impl BBox {
     pub fn center(&self) -> Option<[i64; 3]> {
         let (min, max) = self.bounds?;
         let mid = |a: i64, b: i64| ((a as i128 + b as i128) / 2) as i64;
-        Some([mid(min[0], max[0]), mid(min[1], max[1]), mid(min[2], max[2])])
+        Some([
+            mid(min[0], max[0]),
+            mid(min[1], max[1]),
+            mid(min[2], max[2]),
+        ])
     }
 
     /// `min → max`, for human-readable output.
@@ -226,15 +216,21 @@ impl BBox {
         let (min, max) = self.bounds?;
         let size = self.size()?;
         let center = self.center()?;
-        let f = |v: [i64; 3]| [
-            format_fixed_as_decimal(v[0]),
-            format_fixed_as_decimal(v[1]),
-            format_fixed_as_decimal(v[2]),
-        ];
+        let f = |v: [i64; 3]| {
+            [
+                format_fixed_as_decimal(v[0]),
+                format_fixed_as_decimal(v[1]),
+                format_fixed_as_decimal(v[2]),
+            ]
+        };
         Some(BBoxRecord {
             min: f(min),
             max: f(max),
-            size: [format_fixed(size[0]), format_fixed(size[1]), format_fixed(size[2])],
+            size: [
+                format_fixed(size[0]),
+                format_fixed(size[1]),
+                format_fixed(size[2]),
+            ],
             center: f(center),
         })
     }
@@ -259,7 +255,14 @@ mod tests {
 
     #[test]
     fn parses_and_formats_round_trip() {
-        for s in ["0", "1", "-1", "1000000.0000000001", "-0.5", "651234.5678901234"] {
+        for s in [
+            "0",
+            "1",
+            "-1",
+            "1000000.0000000001",
+            "-0.5",
+            "651234.5678901234",
+        ] {
             assert_eq!(format_fixed_as_decimal(parse_decimal_fixed(s).unwrap()), {
                 // round-trip drops the redundant ".0" but keeps every significant digit
                 let t = if s.contains('.') {
@@ -276,7 +279,10 @@ mod tests {
     fn rounds_the_eleventh_fractional_digit() {
         assert_eq!(parse_decimal_fixed("0.00000000005").unwrap(), 1);
         assert_eq!(parse_decimal_fixed("0.00000000004").unwrap(), 0);
-        assert_eq!(parse_decimal_fixed("-0.99999999995").unwrap(), -SCALE as i64);
+        assert_eq!(
+            parse_decimal_fixed("-0.99999999995").unwrap(),
+            -SCALE as i64
+        );
     }
 
     #[test]
@@ -294,10 +300,22 @@ mod tests {
 
     #[test]
     fn handles_edge_shaped_decimals() {
-        assert_eq!(format_fixed_as_decimal(parse_decimal_fixed(".5").unwrap()), "0.5");
-        assert_eq!(format_fixed_as_decimal(parse_decimal_fixed("1.").unwrap()), "1");
-        assert_eq!(format_fixed_as_decimal(parse_decimal_fixed("+2.25").unwrap()), "2.25");
-        assert_eq!(format_fixed_as_decimal(parse_decimal_fixed("-0").unwrap()), "0");
+        assert_eq!(
+            format_fixed_as_decimal(parse_decimal_fixed(".5").unwrap()),
+            "0.5"
+        );
+        assert_eq!(
+            format_fixed_as_decimal(parse_decimal_fixed("1.").unwrap()),
+            "1"
+        );
+        assert_eq!(
+            format_fixed_as_decimal(parse_decimal_fixed("+2.25").unwrap()),
+            "2.25"
+        );
+        assert_eq!(
+            format_fixed_as_decimal(parse_decimal_fixed("-0").unwrap()),
+            "0"
+        );
         // digits past the tenth are dropped (the eleventh only rounds), and the formatter
         // trims the trailing zero
         assert_eq!(

@@ -91,6 +91,17 @@ impl Lexer {
         Ok(Some(b))
     }
 
+    fn push_text(&mut self, byte: u8) -> std::io::Result<()> {
+        if self.text.len() >= 1024 * 1024 {
+            return Err(std::io::Error::new(
+                ErrorKind::InvalidData,
+                "VRML token exceeds 1 MiB limit",
+            ));
+        }
+        self.text.push(byte);
+        Ok(())
+    }
+
     fn next_token(&mut self) -> std::io::Result<Option<Tok>> {
         loop {
             let b = match self.get()? {
@@ -116,20 +127,20 @@ impl Lexer {
                     while let Some(c) = self.get()? {
                         if c == b'\\' {
                             if let Some(esc) = self.get()? {
-                                self.text.push(esc);
+                                self.push_text(esc)?;
                             }
                             continue;
                         }
                         if c == b'"' {
                             break;
                         }
-                        self.text.push(c);
+                        self.push_text(c)?;
                     }
                     return Ok(Some(Tok::Str));
                 }
                 _ => {
                     self.text.clear();
-                    self.text.push(b);
+                    self.push_text(b)?;
                     while let Some(c) = self.get()? {
                         match c {
                             b' ' | b'\t' | b'\r' | b'\n' | b',' => break,
@@ -137,7 +148,7 @@ impl Lexer {
                                 self.pending = Some(c);
                                 break;
                             }
-                            _ => self.text.push(c),
+                            _ => self.push_text(c)?,
                         }
                     }
                     let first = self.text[0];
@@ -260,7 +271,21 @@ fn read_face(r: &mut impl Read, out: &mut Vec<i32>) -> std::io::Result<bool> {
         match read_i32(r)? {
             None => return Ok(!out.is_empty()),
             Some(-1) => return Ok(true),
-            Some(i) => out.push(i),
+            Some(i) => {
+                if i < 0 {
+                    return Err(std::io::Error::new(
+                        ErrorKind::InvalidData,
+                        "VRML index must be >= 0 or -1",
+                    ));
+                }
+                if out.len() >= crate::obj::MAX_FACE {
+                    return Err(std::io::Error::new(
+                        ErrorKind::InvalidData,
+                        "VRML face exceeds corner limit",
+                    ));
+                }
+                out.push(i);
+            }
         }
     }
 }
@@ -271,19 +296,23 @@ fn read_face(r: &mut impl Read, out: &mut Vec<i32>) -> std::io::Result<bool> {
 struct Material {
     name: String,
     diffuse: Option<[String; 3]>,
+    emissive: Option<[String; 3]>,
     specular: Option<[String; 3]>,
     shininess: Option<String>,
     transparency: Option<String>,
     texture: Option<String>,
+    double_sided: bool,
 }
 
 impl Material {
     fn is_empty(&self) -> bool {
         self.diffuse.is_none()
+            && self.emissive.is_none()
             && self.specular.is_none()
             && self.shininess.is_none()
             && self.transparency.is_none()
             && self.texture.is_none()
+            && !self.double_sided
     }
 }
 
@@ -305,7 +334,6 @@ fn sanitize(s: &str) -> String {
 #[derive(Default)]
 struct Warned {
     colors: bool,
-    transform: bool,
     ragged: bool,
     short_face: bool,
 }
@@ -383,7 +411,7 @@ pub fn convert(opts: &ImportOptions) -> Res<()> {
                     vals.push(lex.text());
                     if vals.len() == *want {
                         let (field, vals, _) = collect.take().unwrap();
-                        apply_scalar_field(&field, &vals, &mut shape, &mut warned);
+                        apply_scalar_field(&field, &vals, &mut shape)?;
                     }
                 }
             }
@@ -393,16 +421,43 @@ pub fn convert(opts: &ImportOptions) -> Res<()> {
                 let w = lex.text();
                 let current = current_node(&stack);
                 match (current, w.as_str()) {
-                    (Node::Material, "diffuseColor") | (Node::Material, "specularColor") => {
+                    (Node::Material, "diffuseColor")
+                    | (Node::Material, "specularColor")
+                    | (Node::Material, "emissiveColor") => {
                         collect = Some((w.clone(), Vec::new(), 3));
                     }
                     (Node::Material, "shininess") | (Node::Material, "transparency") => {
                         collect = Some((w.clone(), Vec::new(), 1));
                     }
-                    (Node::Transform, "translation") | (Node::Transform, "scale") => {
+                    (Node::Transform, "translation")
+                    | (Node::Transform, "scale")
+                    | (Node::Transform, "center") => {
                         collect = Some((w.clone(), Vec::new(), 3));
                     }
+                    (Node::Transform, "rotation" | "scaleOrientation") => {
+                        collect = Some((w.clone(), Vec::new(), 4))
+                    }
                     _ => {}
+                }
+                if w == "USE" {
+                    return Err("VRML USE references are unsupported; expand them first".into());
+                }
+                if current == Node::IndexedFaceSet
+                    && w == "FALSE"
+                    && matches!(
+                        words.last().map(String::as_str),
+                        Some("ccw" | "normalPerVertex")
+                    )
+                {
+                    return Err("VRML ccw FALSE and normalPerVertex FALSE are unsupported".into());
+                }
+                if current == Node::IndexedFaceSet
+                    && w == "FALSE"
+                    && words.last().map(String::as_str) == Some("solid")
+                {
+                    if let Some(s) = shape.as_mut() {
+                        s.material.double_sided = true;
+                    }
                 }
                 words.push(w);
                 if words.len() > 3 {
@@ -412,7 +467,9 @@ pub fn convert(opts: &ImportOptions) -> Res<()> {
 
             Tok::Str => {
                 // `url "file.jpg"` without brackets
-                if current_node(&stack) == Node::ImageTexture && words.last().map(String::as_str) == Some("url") {
+                if current_node(&stack) == Node::ImageTexture
+                    && words.last().map(String::as_str) == Some("url")
+                {
                     if let Some(s) = shape.as_mut() {
                         s.material.texture = Some(lex.text());
                     }
@@ -421,6 +478,34 @@ pub fn convert(opts: &ImportOptions) -> Res<()> {
 
             Tok::LBrace => {
                 let kind = words.last().map(|w| node_kind(w)).unwrap_or(Node::Other);
+                if kind == Node::Material {
+                    if let Some(s) = shape.as_mut() {
+                        s.material.diffuse = Some(["0.8".into(), "0.8".into(), "0.8".into()]);
+                        s.material.specular = Some(["0".into(), "0".into(), "0".into()]);
+                        s.material.emissive = Some(["0".into(), "0".into(), "0".into()]);
+                        s.material.shininess = Some("0.2".into());
+                        s.material.transparency = Some("0".into());
+                    }
+                }
+                if matches!(
+                    words.last().map(String::as_str),
+                    Some(
+                        "Box"
+                            | "Sphere"
+                            | "Cone"
+                            | "Cylinder"
+                            | "ElevationGrid"
+                            | "Extrusion"
+                            | "Text"
+                            | "PointSet"
+                            | "IndexedLineSet"
+                            | "Switch"
+                            | "LOD"
+                            | "Billboard"
+                    )
+                ) {
+                    return Err("Unsupported VRML geometry or conditional node".into());
+                }
                 if kind == Node::Shape {
                     shape_count += 1;
                     let name = def_name(&words)
@@ -440,6 +525,9 @@ pub fn convert(opts: &ImportOptions) -> Res<()> {
                         normal: None,
                         material: Material::default(),
                     });
+                }
+                if stack.len() >= 1024 {
+                    return Err("VRML nesting exceeds 1024 levels".into());
                 }
                 stack.push(Frame::Node(kind));
                 words.clear();
@@ -486,9 +574,8 @@ pub fn convert(opts: &ImportOptions) -> Res<()> {
         }
     }
 
-    // A Shape left unclosed by a truncated file still deserves its faces.
-    if let Some(s) = shape.take() {
-        finish_shape(s, &mut out, &mut materials, &mut guard, &mut warned)?;
+    if shape.is_some() || !stack.is_empty() {
+        return Err("Truncated VRML file: unclosed node or array".into());
     }
 
     out.flush()?;
@@ -528,7 +615,10 @@ fn check_header(path: &str) -> Res<()> {
     match f.read(&mut head) {
         Ok(n) if n == 5 && &head == b"#VRML" => Ok(()),
         Ok(_) => {
-            eprintln!("Warning: {} does not start with `#VRML`; parsing it anyway.", path);
+            eprintln!(
+                "Warning: {} does not start with `#VRML`; parsing it anyway.",
+                path
+            );
             Ok(())
         }
         Err(e) => Err(format!("{}: {}", path, e).into()),
@@ -553,40 +643,47 @@ fn def_name(words: &[String]) -> Option<String> {
     }
 }
 
-fn apply_scalar_field(
-    field: &str,
-    vals: &[String],
-    shape: &mut Option<Shape>,
-    warned: &mut Warned,
-) {
-    if field == "translation" || field == "scale" {
+fn apply_scalar_field(field: &str, vals: &[String], shape: &mut Option<Shape>) -> Res<()> {
+    if matches!(
+        field,
+        "translation" | "scale" | "center" | "rotation" | "scaleOrientation"
+    ) {
+        let nums = vals
+            .iter()
+            .map(|v| v.parse::<f64>())
+            .collect::<Result<Vec<_>, _>>()?;
         let identity = match field {
-            "translation" => vals.iter().all(|v| v.parse::<f64>().map(|f| f == 0.0).unwrap_or(false)),
-            _ => vals.iter().all(|v| v.parse::<f64>().map(|f| f == 1.0).unwrap_or(false)),
+            "scale" => nums.iter().all(|v| *v == 1.),
+            "rotation" | "scaleOrientation" => nums[3] == 0.,
+            _ => nums.iter().all(|v| *v == 0.),
         };
-        if !identity && !warned.transform {
-            warned.transform = true;
-            eprintln!(
-                "Warning: Transform {} {} is not the identity and is NOT applied — \
-                 the output keeps the raw coordinates.",
-                field,
-                vals.join(" ")
-            );
+        if !identity {
+            return Err(format!(
+                "Non-identity VRML Transform {field} is unsupported; bake transforms first"
+            )
+            .into());
         }
-        return;
+        return Ok(());
     }
-
-    let Some(s) = shape.as_mut() else { return };
+    let Some(s) = shape.as_mut() else {
+        return Ok(());
+    };
     let three = || -> Option<[String; 3]> {
-        Some([vals.first()?.clone(), vals.get(1)?.clone(), vals.get(2)?.clone()])
+        Some([
+            vals.first()?.clone(),
+            vals.get(1)?.clone(),
+            vals.get(2)?.clone(),
+        ])
     };
     match field {
         "diffuseColor" => s.material.diffuse = three(),
         "specularColor" => s.material.specular = three(),
+        "emissiveColor" => s.material.emissive = three(),
         "shininess" => s.material.shininess = vals.first().cloned(),
         "transparency" => s.material.transparency = vals.first().cloned(),
         _ => {}
     }
+    Ok(())
 }
 
 /// Consume one data array, up to its closing `]`.
@@ -614,7 +711,10 @@ fn read_array(
     };
 
     // Index arrays need a spool; create it lazily so an absent array stays absent.
-    if matches!(kind, Array::CoordIndex | Array::TexCoordIndex | Array::NormalIndex) {
+    if matches!(
+        kind,
+        Array::CoordIndex | Array::TexCoordIndex | Array::NormalIndex
+    ) {
         if let Some(s) = shape.as_mut() {
             let (slot, suffix) = match kind {
                 Array::CoordIndex => (&mut s.coord, "coord"),
@@ -734,12 +834,15 @@ fn finish_shape(
     warned: &mut Warned,
 ) -> Res<()> {
     if !s.material.is_empty() {
-        s.material.name = format!("{}_mtl", s.name);
+        s.material.name = format!("{}_mtl_{}", s.name, materials.len());
         writeln!(out, "usemtl {}", s.material.name)?;
         materials.push(std::mem::take(&mut s.material));
     }
 
-    for sp in [&mut s.coord, &mut s.texcoord, &mut s.normal].into_iter().flatten() {
+    for sp in [&mut s.coord, &mut s.texcoord, &mut s.normal]
+        .into_iter()
+        .flatten()
+    {
         sp.finish()?;
     }
 
@@ -777,6 +880,20 @@ fn finish_shape(
             }
         }
 
+        if (tr.is_some() && tf.len() != cf.len()) || (nr.is_some() && nf.len() != cf.len()) {
+            return Err("VRML attribute index arrays do not match coordIndex".into());
+        }
+        if cf.iter().any(|i| *i as u64 >= s.v_count)
+            || tf.iter().any(|i| *i as u64 >= s.vt_count)
+            || nf.iter().any(|i| *i as u64 >= s.vn_count)
+        {
+            return Err("VRML attribute index out of range".into());
+        }
+        if (tex_from_coord && cf.iter().any(|i| *i as u64 >= s.vt_count))
+            || (normal_from_coord && cf.iter().any(|i| *i as u64 >= s.vn_count))
+        {
+            return Err("VRML implicit attribute index out of range".into());
+        }
         if cf.len() < 3 {
             if !warned.short_face {
                 warned.short_face = true;
@@ -824,21 +941,28 @@ fn num(raw: &str) -> String {
 }
 
 fn write_mtl(path: &std::path::Path, materials: &[Material]) -> Res<()> {
-    let mut f = BufWriter::new(File::create(path).map_err(|e| format!("{}: {}", path.display(), e))?);
+    let mut f =
+        BufWriter::new(File::create(path).map_err(|e| format!("{}: {}", path.display(), e))?);
     writeln!(f, "# Generated by objtools")?;
     for m in materials {
         writeln!(f)?;
         writeln!(f, "newmtl {}", m.name)?;
+        if m.double_sided {
+            writeln!(f, "objtools_doubleSided 1")?;
+        }
         if let Some(d) = &m.diffuse {
             writeln!(f, "Kd {} {} {}", num(&d[0]), num(&d[1]), num(&d[2]))?;
         }
         if let Some(s) = &m.specular {
             writeln!(f, "Ks {} {} {}", num(&s[0]), num(&s[1]), num(&s[2]))?;
         }
-        // VRML shininess is 0..1; OBJ Ns is 0..1000.
+        if let Some(e) = &m.emissive {
+            writeln!(f, "Ke {} {} {}", num(&e[0]), num(&e[1]), num(&e[2]))?;
+        }
+        // VRML uses a 0..1 factor for an OpenGL exponent in 0..128.
         if let Some(sh) = &m.shininess {
             if let Ok(v) = sh.parse::<f64>() {
-                writeln!(f, "Ns {}", v * 1000.0)?;
+                writeln!(f, "Ns {}", v * 128.0)?;
             }
         }
         if let Some(t) = &m.transparency {
@@ -860,7 +984,10 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn tmp_path(suffix: &str) -> PathBuf {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         let mut p = std::env::temp_dir();
         p.push(format!("objtools_vrml_test_{}_{}", now, suffix));
         p
@@ -1007,11 +1134,16 @@ DEF Panel Shape {
     material Material { diffuseColor 0.34 0.56 0.87 specularColor .1 .1 .1 shininess .5 }
     texture ImageTexture { url "panel.jpg" } } }"#,
         );
-        assert_eq!(lines_starting(&obj, "usemtl "), vec!["usemtl Panel_mtl"]);
+        assert_eq!(lines_starting(&obj, "usemtl "), vec!["usemtl Panel_mtl_0"]);
         // usemtl must precede the faces it applies to
         let u = obj.lines().position(|l| l.starts_with("usemtl ")).unwrap();
         let f = obj.lines().position(|l| l.starts_with("f ")).unwrap();
-        assert!(u < f, "usemtl at {} should come before the first face at {}", u, f);
+        assert!(
+            u < f,
+            "usemtl at {} should come before the first face at {}",
+            u,
+            f
+        );
     }
 
     #[test]

@@ -1,317 +1,133 @@
 # objtools
 
-Command-line tools to manipulate Wavefront OBJ files. Designed to accomodate very large file on human-sized computers. It can be used to import a mesh from another format, split an OBj file into its constituent models, center georeferenced coordinates or just analyze the content of a file.
-
-Every subcommand reads its input as a stream, one line at a time, and never holds more data than it has to to achieve low resource usage and good speed.
-
-```
-$ objtools inspect model.obj
-┌─ 2 objects
-├── 「Cube」
-│     ├─ 4 vertices
-│     ├─ 2 materials: Wood, Metal
-│     └─ bounds 0 0 0 → 1 1 0
-└── 「Sphere」
-      ├─ 3 vertices
-      ├─ 1 material: Glass
-      └─ bounds 2 0 0 → 3 1 0
-
-   total   7 vertices in 2 objects
-   bounds  0 0 0 → 3 1 0
-   size    3 × 1 × 0
-   center  1.5 0.5 0
-```
-
-## Installation
-
-Prebuilt binaries for Linux, macOS (Intel and Apple Silicon) and Windows are attached to each
-release — download the archive for your platform and put `objtools` on your `PATH`.
-
-To build from source you need a recent stable Rust toolchain:
+A Rust command-line importer for very large OBJ and VRML meshes, including georeferenced assets. It writes glTF 2.0 JSON, a sibling binary geometry buffer and keeps, copies or converts referenced textures according to the image policy.
 
 ```sh
 cargo build --release
-# binary at ./target/release/objtools
+objtools import terrain.obj --center -o terrain.gltf
+objtools import terrain.wrl --center --up-axis z -o terrain.gltf
 ```
+
+The CLI has one command, `import`. The previous `inspect`, `translate`, `repair` and `split` commands have been removed; VRML-to-OBJ is now an internal adapter.
 
 ## Usage
 
-```
-objtools <subcommand> [OPTIONS] <file>
+```text
+objtools import [OPTIONS] <file.obj|file.wrl|file.vrml>
 
-Subcommands:
-  import     Convert another mesh format (.wrl) into OBJ
-  inspect    Extract metadata (object names, vertex counts, materials, bounds)
-  split      Partition a large OBJ into per-object output files
-  translate  Translate a georeferenced OBJ file without loss of precision
-```
-
-Every subcommand accepts `--help`, and `--progress` to report advancement on stderr while
-chewing through a large file.
-
-### `import`
-
-Converts a mesh in another format into OBJ. The input format is chosen by file extension.
-
-Supports VRML (`.wrl`) files, more should be added when needed.
-
-```sh
-objtools import model.wrl -o model.obj    # also writes model.mtl
-objtools import model.wrl                 # OBJ on stdout, no .mtl
-objtools import --progress model.wrl -o model.obj
+-o, --output FILE  Destination .gltf (default: input with .gltf extension)
+    --center       Subtract the whole-input bounding-box center
+    --up-axis AXIS Source up axis: y (default) or z
+    --tmp-dir DIR  Workspace directory (default: OS temporary directory)
+    --keep-tmp     Preserve the workspace for debugging
+    --images MODE  auto (default), keep or copy
+    --convert-images BOOL  auto (default), true or false
+    --image-format FORMAT  jpg (default) or png
+    --image-quality N      JPEG quality 1..100 (default 95)
+    --progress     Report reading and conversion progress on stderr
+-h, --help         Show help
 ```
 
-| Option | Effect |
+Output directories must already exist. Existing output files are never overwritten. A failed import removes only output files it created. Geometry is assembled in a private workspace before publication, and JSON is written last. Publication of multiple files is not an atomic filesystem transaction.
+
+## Georeferenced coordinates
+
+Position decimals, including scientific notation, are parsed directly into signed 64-bit fixed-point integers with ten fractional digits. Values beyond ten fractional digits round to the nearest fixed-point unit, ties away from zero. The supported range is approximately ±922 million source units.
+
+`--center` measures all declared positions, subtracts the center using widened integer arithmetic, then converts the local result to float32. This avoids first rounding projected world coordinates to float32. The center is rounded to the fixed-point grid; glTF geometry still has float32 precision, so very large local extents can require spatial tiling.
+
+The origin and original bounds are recorded as decimal strings in `extras.objtools`. Restore a source position by undoing the optional axis rotation and adding the stored origin. The origin is not applied back as a scene translation, because that would defeat recentering.
+
+The default assumes Y-up input. `--up-axis z` gives each mesh node a rotation mapping `(x, y, z)` to `(x, z, -y)` in glTF's Y-up frame. Coordinates and origin metadata remain in the source frame. Source units are assumed to be metres; no CRS, reprojection or unit conversion is inferred. For sibling assets that must stay aligned, independently centering each file will give different origins; retain and account for the recorded origins.
+
+## Disk-backed conversion
+
+OBJ is read once into position/UV/normal spools and a sequential face spool. Negative indices are resolved when they appear; positive references are checked against final attribute counts. Fixed-width records allow referenced attributes to be retrieved by seeking without keeping the entire model in memory.
+
+The replay pass triangulates polygons using ear clipping and builds primitives with at most 65,536 vertices and 65,536 triangles. Each chunk has a local `(position, UV, normal)` mapping, so seams are preserved. Bounding triangle count as well as vertex count prevents repeated faces from growing memory indefinitely. Vertices can be duplicated between chunks. No whole-object deduplication or global mesh optimization is performed.
+
+Working geometry memory is bounded by a chunk, a face and a capped 65,536-entry normal accumulator. Missing normals add one face replay pass and a 24-byte-per-source-position disk spool. JSON metadata grows with objects, materials and emitted primitives, and is currently retained in memory. The exporter supports a single object larger than RAM; it does not promise constant memory for arbitrarily many objects/primitives. OBJ lines and VRML tokens are limited to 1 MiB, VRML nesting to 1,024 levels, and polygons to 4,096 corners; oversized records are rejected explicitly.
+
+VRML uses the existing streaming IndexedFaceSet reader to make a temporary OBJ/MTL, then follows the same pipeline. This uses extra disk space and I/O but preserves the fixed-point coordinate path. Allow workspace space for the attribute/face spools, generated binary geometry and (for VRML) intermediate OBJ/MTL. Temporary files are removed on success or error unless `--keep-tmp` is set. Seek-heavy conversion benefits from an SSD.
+
+## Materials: Phong to PBR
+
+Phong and PBR cannot be matched exactly. The conversion policy is intentionally explicit:
+
+| Source | glTF mapping |
 | --- | --- |
-| `-o, --output FILE` | Write the OBJ to `FILE`, and a sibling `.mtl` for the material. Without it the OBJ goes to stdout and no `.mtl` is produced. |
-| `--tmp-dir <DIR>` | Where to put the index spool files (default: OS temp dir). |
-| `--keep-tmp` | Keep the spool files, for debugging. |
-| `--progress` | Report progress on stderr every 100 MB read. |
+| `Kd` | Linear `baseColorFactor`; default `[0.8, 0.8, 0.8]` |
+| `map_Kd` | sRGB base-color texture, multiplied by `Kd`; image policy below, URI escaped |
+| `Ns` | Approximate perceptual roughness `(2 / (Ns + 2))^(1/4)` |
+| `Ks` | `KHR_materials_specular`, interpreted approximately as normal-incidence reflectance |
+| `Ni` | `KHR_materials_ior`; default 1.5 |
+| `Pm`, `Pr` | Explicit metalness/roughness overrides |
+| `Ke` | Linear emissive factor |
+| `d`, `Tr` | Alpha, with `d` taking precedence regardless of property order; alpha below 1 uses `BLEND`; PNG alpha channels or `tRNS` also select `BLEND` |
+| `illum 0` | `KHR_materials_unlit` |
+| `illum 1` | Specular disabled |
 
-Each VRML `Shape` becomes an OBJ object, named after its `DEF` name where it has one and
-`shape_1`, `shape_2`, … otherwise. `Material` and `ImageTexture` become a `usemtl`/`newmtl` pair
-carrying `Kd`, `Ks`, `Ns`, `d` and `map_Kd`. Coordinates go through the same fixed-point path as
-`translate`, so a georeferenced model converts **without losing a digit**.
+Metalness defaults to zero: a large or colored `Ks` alone does not establish that a surface is metallic. With IOR 1.5, `Ks` is represented by `specularColorFactor = Ks / 0.04`; other IOR values use their corresponding Fresnel reflectance. IOR 1 produces zero dielectric reflectance. This preserves the approximate specular color/intensity for extension-aware viewers without inventing metalness. Core-only viewers use the metallic-roughness fallback and will render different specular responses. Extensions are listed in `extensionsUsed`, not required.
 
-What is read: `IndexedFaceSet` geometry — `coord`/`Coordinate`, `texCoord`/`TextureCoordinate`,
-`normal`/`Normal` and the `coordIndex` / `texCoordIndex` / `normalIndex` arrays, in whatever order
-the file declares them. Per VRML's rules an absent `texCoordIndex` falls back to `coordIndex`.
-Polygons are passed through as n-gons rather than triangulated. The VRML 1.0 spellings
-`Coordinate3` and `TextureCoordinate2` are accepted.
+Material colors and opacity are clamped to `[0,1]`, shininess to nonnegative values, and IOR must be at least 1. Effective Phong parameters are retained under each material's `extras.sourcePhong`. Scalar colors are treated as linear; exporters that wrote sRGB scalar colors need preprocessing. Ambient `Ka` is omitted because ambient illumination belongs to the viewer's lighting. Reflection/refraction illumination modes are approximated as opaque/alpha-blended PBR rather than synthesized physical transmission.
 
-What is **not** read. Each of these warns on stderr rather than failing, so a conversion never
-silently loses something without saying so:
+VRML material defaults are preserved, including zero specular color, shininess 0.2, transparency and emissive color. VRML shininess is converted to an exponent using a scale of 128. `solid FALSE` becomes `doubleSided`.
 
-- **Per-vertex colours** (`Color` nodes) are dropped — OBJ has no standard way to carry them.
-- **`Transform` translation/scale** is not applied; the output keeps the raw coordinates. A
-  non-identity transform produces a warning so it cannot pass unnoticed.
-- `Switch`, `LOD`, `Billboard`, `Extrusion`, `ElevationGrid` and the other non-`IndexedFaceSet`
-  geometry nodes are skipped, as is `USE` node reuse.
+Unsupported MTL maps/properties warn explicitly. `map_Kd` options, missing textures, image formats that cannot be decoded (or require disabled conversion), and textured faces without UVs are errors. Separate opacity/specular/bump maps are not baked into PBR textures. Both OBJ and VRML UVs have V flipped for glTF's texture convention.
 
-### `inspect`
+Policy references: [KHR_materials_specular](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_materials_specular), [VRML lighting model](https://www.web3d.org/documents/specifications/14772/V2.0/part1/concepts.html).
 
-Single streaming pass. Reports every `o` group with its vertex count and the materials it uses.
+## Image policy
 
-```sh
-objtools inspect model.obj             # tree view
-objtools inspect --json model.obj      # pretty-printed JSON
-objtools inspect --compact model.obj   # single-line JSON, for piping into jq
-objtools inspect --progress model.obj  # progress on stderr every 100 MB
-```
+`--images auto` keeps original image references when output and input are in the same folder and the image needs no conversion. It copies images otherwise. `--images keep` explicitly references original files using relative, escaped URIs, even across folders; `--images copy` explicitly copies images. Sources are never modified. Conversion always writes a new image in the output folder, even with `--images keep`.
 
-```json
-{
-  "total_objects": 2,
-  "total_vertices": 7,
-  "bounding_box": {
-    "min":    ["0", "0", "0"],
-    "max":    ["3", "1", "0"],
-    "size":   ["3", "1", "0"],
-    "center": ["1.5", "0.5", "0"]
-  },
-  "objects": [
-    {
-      "name": "Cube",
-      "vertex_count": 4,
-      "materials": ["Wood", "Metal"],
-      "bounding_box": { "min": ["0", "0", "0"], "max": ["1", "1", "0"], "…": [] }
-    }
-  ]
-}
-```
+`--convert-images auto` does not convert JPG/JPEG or PNG; all other source formats require conversion. `--convert-images true` converts every referenced image. `--convert-images false` forbids conversion: encountering a non-JPG/PNG image is an error and aborts the import. Both `--convert-images=false` and `--convert-images false` are accepted.
 
-Vertices are attributed to the `o` group they are declared under. A file with geometry before
-any `o` line reports it under the name `(default)`.
+Conversion defaults to `--image-format jpg --image-quality 95`. PNG conversion is lossless and keeps alpha; quality only applies to JPEG. JPEG composites transparent pixels onto white and reports this explicitly. Choosing a format does not itself force conversion of already-supported files: use `--convert-images true` for that.
 
-Bounding-box coordinates are emitted as decimal **strings**, not JSON numbers. A georeferenced
-coordinate carries more significant digits than a JSON number survives in most parsers, and
-quietly rounding them here would defeat the point of the fixed-point pipeline described below.
-An object with no vertices reports no bounds rather than a box collapsed on the origin.
-
-### `split`
-
-Writes one self-contained `.obj` per object into an existing output directory. Each output file
-carries the original `mtllib` declarations, only the vertices/texcoords/normals its faces
-actually reference, and face indices renumbered accordingly.
+Supported conversion inputs include BMP, TGA, TIFF, WebP, GIF, PNM, HDR, DDS, ICO, QOI and EXR, in addition to JPG/PNG. Unsupported codecs, missing files and corrupt input images are errors. Conversion decodes one image at a time with the image library's allocation limits (default 512 MiB); its memory usage depends on image dimensions, separately from the bounded geometry pipeline. Unconverted JPG/PNG images use header checks and byte copies, without decoding all pixels. Animation is reduced to the decoded image/frame.
 
 ```sh
-mkdir -p parts
-objtools split --output-dir parts model.obj
-
-objtools split --output-dir parts --by-material model.obj   # one file per object × material
-objtools split --output-dir parts --tmp-dir /mnt/big model.obj
+objtools import mesh.obj --images keep -o elsewhere/mesh.gltf
+objtools import mesh.obj --convert-images true --image-format jpg --image-quality 95
+objtools import mesh.obj --convert-images true --image-format png
 ```
 
-| Option | Effect |
-| --- | --- |
-| `--output-dir <DIR>` | Destination for the `.obj` files. Required, must already exist. |
-| `--by-material` | Split on object × material instead of object only. |
-| `--tmp-dir <DIR>` | Where to put the intermediate binary files (default: OS temp dir). Point this at a disk with room for roughly the size of the input. |
-| `--keep-tmp` | Keep the intermediate files, for debugging. |
-| `--progress` | Report pass 1 every 100 MB, then one line per group in pass 2. |
+## Geometry coverage and limitations
 
-Output names are derived from the object name with path-hostile characters replaced by `_`;
-collisions get a `_2`, `_3`, … suffix rather than overwriting.
+OBJ objects become named meshes/nodes. Material changes, attribute-layout changes and chunk limits create separate primitives. Every primitive owns its buffer views; no vertex buffer is shared between meshes. A future glTF-side `split` can copy the referenced ranges and remap accessors, buffer views, materials and textures without reparsing source geometry. Empty objects are omitted, and OBJ `g` labels are not turned into separate meshes.
 
-### `translate`
+Valid source normals are preserved and normalized. Zero-length source normals are repaired with generated smooth normals and reported. Missing normals default to smooth shading: triangle normals are accumulated with area weights by source position index in a disk-backed spool, then normalized. OBJ smoothing groups (including `s off`) and VRML crease angles do not disable this default. Smoothing crosses material, UV and output-chunk boundaries for shared position indices; separate position indices are not welded. Opposing faces whose accumulated normals cancel fall back to their polygon normal. Faces mixing present and missing UVs/normals are rejected. Degenerate triangles are skipped with a count on stderr; untriangulatable polygons are errors. OBJ homogeneous positions, per-vertex colors and 3D texture coordinates are unsupported. Unsupported OBJ records warn and are omitted.
 
-Subtracts a chosen origin from every vertex, so a mesh authored in projected world coordinates
-(Lambert-93, UTM…) ends up near `0 0 0` where renderers keep their precision.
-
-```sh
-objtools translate --center model.obj -o centered.obj            # origin = bounding-box center
-objtools translate --origin 651000,6862000,120 model.obj -o centered.obj
-objtools translate --origin 651000 6862000 120 model.obj         # to stdout
-objtools translate model.obj -o centered.obj                     # origin = first vertex
-```
-
-There are three ways to pick the origin:
-
-| Mode | Origin | Passes |
-| --- | --- | --- |
-| `--center` | Center of the model's bounding box. | 2 |
-| `--origin X,Y,Z` | Exactly what you give it. | 1 |
-| *(default)* | The first `v` line in the file. | 1 |
-
-`--center` is usually what you want: it puts the model's actual middle on the origin, which the
-first vertex only does by accident. It costs a first streaming pass to measure the bounding box —
-still constant memory, just twice the reading. `--center` and `--origin` are mutually exclusive,
-and centering a file with no vertices is an error rather than a silent copy.
-
-Whichever mode is used, the origin is echoed on stderr, so the same value can be fed back through
-`--origin` later — for instance to translate sibling files by exactly the same amount, or to
-translate the geometry of a scene one object at a time. Non-vertex lines are passed through
-untouched.
-
-## Design
-
-### Streaming, always
-
-`inspect` and `translate` are line-at-a-time streamers over a 64 kB `BufReader`, in constant
-memory. `inspect` retains only the accumulated per-object records — a few hundred bytes per
-object, so even a file with a million objects stays well under a gigabyte. `translate` retains
-nothing at all beyond the origin.
-
-A bounding box is six integers, so measuring one costs nothing in memory: `inspect` keeps one per
-object plus a running total, and `translate --center` keeps exactly one for its first pass. What it
-does cost is *parsing* — the default `inspect` has to turn every coordinate into a number rather
-than just counting `v` lines, which is why `parse_decimal_fixed` is written to be allocation-free
-(see below). On a 393 MB / 2.2 M-vertex file the bounding box adds roughly 30% to the wall time.
-
-Nothing ever calls `read_to_string`, and nothing memory-maps the input. That is the whole trick,
-and it is the constraint every future subcommand has to respect.
-
-### `import`: spooling the index arrays
-
-VRML stores a face's position indices and its texture-coordinate indices in two separate arrays
-(`coordIndex`, `texCoordIndex`) that pair up positionally, and it is free to declare them in
-either order — the sample file this was built against puts `texCoordIndex` first. OBJ wants the
-two woven together on a single `f` line, so the converter cannot emit a face until it has seen
-every index array of that `Shape`.
-
-Keeping them in memory is exactly what this project refuses to do, so each index array is spooled
-to a fixed-width binary temp file as it streams past (little-endian `i32`, VRML's `-1` face
-terminators kept inline). At the end of each `Shape` the spools are replayed in lockstep and the
-`f` lines are written. Vertices, texture coordinates and normals need no spool at all: they are
-written to the OBJ as they are parsed, which also happens to put them ahead of the faces that
-reference them, exactly where OBJ wants them.
-
-The reader underneath is a byte-level scanner rather than a line reader — VRML arrays run to
-millions of tokens spread arbitrarily across lines, so there are no line boundaries worth
-respecting. Converting a 228 MB `.wrl` (1.05 M vertices, 2.10 M faces) runs in about ten seconds
-and completes unchanged under a 64 MB address-space cap.
-
-### `split`: two passes with binary side files
-
-Splitting cannot be done in one pass. Faces reference vertices by global index and OBJ allows a
-face to point back at a vertex declared arbitrarily far earlier in the file, so writing out
-"object N" requires random access to vertex data that the stream has long since passed.
-
-Rather than keep vertices in memory, pass 1 spools them to fixed-width binary side files:
-
-```
-Pass 1 (streaming read of the input)
-  v  ──▶ verts.bin       24 bytes per record (3 × f64)
-  vt ──▶ texcoords.bin   16 bytes per record (2 × f64)
-  vn ──▶ normals.bin     24 bytes per record (3 × f64)
-  f  ──▶ faces__<object>.bin   one file per output group
-  usemtl ──▶ sentinel record inside the group's face file
-
-Pass 2 (per group)
-  a. scan the group's face file, collect + sort + dedup the indices it references
-  b. seek into verts.bin / texcoords.bin / normals.bin at index × record size
-  c. re-scan the face file, emit faces with indices remapped via binary search
-```
-
-Fixed-width records are what make step (b) an `O(1)` seek instead of a scan: vertex *n* always
-lives at byte `(n - 1) × 24`. Face records are `1 + 12 × N` bytes (a vertex count, then
-`(v, vt, vn)` as three `u32`s, `0` meaning absent), and negative OBJ indices are resolved against
-the running counts during pass 1, while those counts are still correct.
-
-Material changes inside a group are preserved by writing a sentinel record (`N = 0` followed by a
-material id) into the face stream, so `usemtl` lines come back out in the right places rather than
-being flattened to one material per file.
-
-The only unbounded structure is the set of groups, and even there open file handles are capped at
-`MAX_OPEN_FACE_FILES` (400): writers are closed and reopened in append mode as needed, so a file
-with tens of thousands of objects does not exhaust the process's descriptor limit.
-
-Cost: temp files roughly the size of the input geometry, and two reads instead of one. Temp files
-are removed by a `Drop` guard, including on error, unless `--keep-tmp` is given.
-
-### `translate`: fixed-point arithmetic
-
-Georeferenced coordinates are the pathological case for floating point. A value like
-`651234.5678901234` uses most of an `f64`'s 15–16 significant digits on the part that is about to
-be subtracted away, and reformatting it through Rust's float printer does not necessarily give back
-the digits that were in the file.
-
-So coordinates are never converted to `f64` at all (except for exponent-notation inputs, which fall
-back to a float parse). Decimal strings are parsed **by hand** into `i64` fixed-point with 10
-fractional digits — a scale of 0.1 nm, with an `i64` range of ±922 million metres, comfortably
-covering any projected coordinate system. Subtraction is then exact integer arithmetic, and the
-result is formatted back to decimal with trailing zeros trimmed, so `1000001 - 1000000` prints as
-`1` and not `0.9999999999`.
-
-All three of `inspect`, `translate` and `import` share this path, which is why a `.wrl` can be
-converted, centered and measured without any stage rounding the coordinates the previous one
-produced. That parser (`src/fixed.rs`) runs three times per vertex, so it walks the bytes of the number
-directly and allocates nothing. The same module holds `BBox`, which is why `inspect`'s bounds,
-`translate --center`'s origin and the translation itself all agree to the last digit: the midpoint
-of the box is computed as an exact integer, widened to `i128` only so the intermediate sum cannot
-overflow.
-
-### Why Rust
-
-Predictable memory (no GC pauses on multi-hour runs), `BufReader`/`BufWriter` that make the
-streaming discipline the natural way to write the code, cheap exact integer arithmetic, and a
-single static binary per platform with no runtime to install on the machine doing the processing.
+VRML coverage is IndexedFaceSet geometry with inline Coordinate, TextureCoordinate, Normal, Material and ImageTexture nodes. Index arrays may arrive in any order. Non-identity transforms, USE references, non-IndexedFaceSet primitive geometry, conditional nodes, `ccw FALSE` and `normalPerVertex FALSE` are rejected rather than silently producing misplaced geometry. Per-vertex colors warn and are omitted; texture transforms, generated UVs and animation are not implemented. Non-default fields beyond this subset are not a complete VRML scene conversion.
 
 ## Development
 
 ```sh
-cargo build           # debug build
-cargo test            # unit tests
-cargo build --release # optimised: LTO, one codegen unit
+cargo fmt --check
+RUSTFLAGS='-D warnings' cargo build --locked
+cargo test --locked
+cargo clippy --all-targets -- -D warnings
 ```
 
-CI (`.github/workflows/ci.yml`) builds and tests on Linux, macOS and Windows for every push and
-pull request, then cross-builds release binaries for four targets:
+Tests cover coordinate precision, scientific notation, negative indices, UV seams, material parameters, mesh ranges, VRML defaults, concave polygons, chunk limits and output cleanup. The glTF writer uses Serde for metadata and a small binary writer, with no mesh-owning library or C/C++ dependency. CI builds and tests on Linux, macOS and Windows.
 
-| Platform | Target |
-| --- | --- |
-| Linux x86-64 | `x86_64-unknown-linux-gnu` |
-| macOS Apple Silicon | `aarch64-apple-darwin` |
-| macOS Intel | `x86_64-apple-darwin` |
-| Windows x86-64 | `x86_64-pc-windows-msvc` |
-
-CI runs with `RUSTFLAGS=-D warnings`, so a compiler warning fails the build — keep the tree
-warning-free, or check locally with `RUSTFLAGS="-D warnings" cargo build`.
-
-Pushing a `v*` tag (e.g. `v0.2.0`) runs the same pipeline and, on success, creates a GitHub release
-with the archives for all four targets attached:
+Optional format validation and a larger-than-memory stress check:
 
 ```sh
-git tag v0.2.0
-git push origin v0.2.0
+npm install --prefix /tmp/objtools-validator gltf-validator
+NODE_PATH=/tmp/objtools-validator/node_modules node tools/validate_gltf.cjs terrain.gltf
+cargo build --release
+python3 tools/stress_import.py
 ```
+
+The Unix stress script generates a single object with nine million triangles, limits the importer to 64 MiB of address space, and verifies all triangles and chunk limits. It uses roughly 1 GiB of temporary disk space.
+
+For a real import with Linux process-memory monitoring:
+
+```sh
+python3 tools/monitor_import.py input.obj destination/model.gltf --center --progress --tmp-dir destination
+NODE_PATH=/tmp/objtools-validator/node_modules node tools/validate_gltf_chunked.cjs destination/model.gltf /tmp/validation.json
+```
+
+The monitor writes import logs, one-second RSS samples and a peak-memory report beside the model. The chunked validator checks the complete JSON structure, then every primitive's binary range and referenced images using Khronos's validator, without loading the entire binary file. The metadata pass defers external-resource I/O checks to the primitive passes.

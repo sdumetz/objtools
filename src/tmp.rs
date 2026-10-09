@@ -11,7 +11,10 @@ pub struct TmpGuard {
 
 impl TmpGuard {
     pub fn new(keep: bool) -> Self {
-        Self { paths: Vec::new(), keep }
+        Self {
+            paths: Vec::new(),
+            keep,
+        }
     }
 
     pub fn track(&mut self, p: PathBuf) -> &PathBuf {
