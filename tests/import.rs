@@ -208,6 +208,29 @@ fn errors_leave_no_output_and_do_not_overwrite() {
     assert!(!result.status.success());
 }
 #[test]
+fn workspace_defaults_to_output_folder_and_is_removed() {
+    let f = Fixture::new();
+    f.file("in.obj", "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n");
+    let entries = |dir: &str| {
+        let mut names: Vec<String> = fs::read_dir(f.0.join(dir))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        names
+    };
+    fs::create_dir(f.0.join("clean")).unwrap();
+    assert!(import_images(&f, "clean/out.gltf", &[]).status.success());
+    assert_eq!(entries("clean"), ["out.bin", "out.gltf"]);
+    fs::create_dir(f.0.join("kept")).unwrap();
+    assert!(import_images(&f, "kept/out.gltf", &["--keep-tmp"])
+        .status
+        .success());
+    let kept = entries("kept");
+    assert_eq!(kept.len(), 3);
+    assert!(f.0.join("kept").join(&kept[0]).join("faces").is_file());
+}
+#[test]
 fn unsupported_vrml_transform_is_an_error() {
     let f = Fixture::new();
     f.file(
@@ -359,7 +382,7 @@ fn vrml_defaults_to_smooth_normals_with_zero_crease_angle() {
 }
 
 #[test]
-fn smooth_normals_survive_accumulator_flush_and_chunk_boundaries() {
+fn smooth_normals_survive_chunk_boundaries() {
     let f = Fixture::new();
     let mut source = fs::File::create(f.0.join("in.obj")).unwrap();
     for i in 0..22000 {

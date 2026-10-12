@@ -172,13 +172,13 @@ pub fn write(scene: Scene, dir: &Path, options: &crate::import::Options) -> Res<
         scene.bbox.range_str().unwrap_or_default(),
         scene.bbox.size_str().unwrap_or_default()
     );
-    let mut attrs = [
-        File::open(dir.join("v"))?,
-        File::open(dir.join("vt"))?,
-        File::open(dir.join("vn"))?,
+    let attrs = [
+        obj::map(&dir.join("v"))?,
+        obj::map(&dir.join("vt"))?,
+        obj::map(&dir.join("vn"))?,
     ];
-    let mut smooth = if scene.missing_normals {
-        Some(crate::smooth::generate(&scene, dir, progress)?)
+    let smooth = if scene.missing_normals {
+        Some(crate::smooth::generate(&scene, &attrs[0], dir, progress)?)
     } else {
         None
     };
@@ -222,7 +222,7 @@ pub fn write(scene: Scene, dir: &Path, options: &crate::import::Options) -> Res<
         let mut positions = Vec::with_capacity(corners.len());
         let mut vertices = Vec::with_capacity(corners.len());
         for c in &corners {
-            let raw = obj::fetch::<3>(&mut attrs[0], c.v, scene.counts[0])?.map(i64::from_le_bytes);
+            let raw = obj::fetch::<3>(&attrs[0], c.v, scene.counts[0])?.map(i64::from_le_bytes);
             let p = std::array::from_fn(|i| {
                 ((raw[i] as i128 - origin[i] as i128) as f64) / (SCALE as f64)
             });
@@ -232,8 +232,7 @@ pub fn write(scene: Scene, dir: &Path, options: &crate::import::Options) -> Res<
                 v[i] = p[i] as f32;
             }
             if normal {
-                let n =
-                    obj::fetch::<3>(&mut attrs[2], c.vn, scene.counts[2])?.map(f64::from_le_bytes);
+                let n = obj::fetch::<3>(&attrs[2], c.vn, scene.counts[2])?.map(f64::from_le_bytes);
                 let length = n.iter().map(|x| x * x).sum::<f64>().sqrt();
                 if !length.is_finite() {
                     return Err("Zero/invalid source normal".into());
@@ -247,8 +246,7 @@ pub fn write(scene: Scene, dir: &Path, options: &crate::import::Options) -> Res<
                 }
             }
             if uv {
-                let t =
-                    obj::fetch::<2>(&mut attrs[1], c.vt, scene.counts[1])?.map(f64::from_le_bytes);
+                let t = obj::fetch::<2>(&attrs[1], c.vt, scene.counts[1])?.map(f64::from_le_bytes);
                 v[6] = t[0] as f32;
                 v[7] = (1. - t[1]) as f32;
             }
@@ -275,7 +273,7 @@ pub fn write(scene: Scene, dir: &Path, options: &crate::import::Options) -> Res<
                 if v[3..6].iter().any(|n| *n != 0.) {
                     continue;
                 }
-                let sum = obj::fetch::<3>(smooth.as_mut().unwrap(), corner.v, scene.counts[0])?
+                let sum = obj::fetch::<3>(smooth.as_ref().unwrap(), corner.v, scene.counts[0])?
                     .map(f64::from_le_bytes);
                 let length = sum.iter().map(|x| x * x).sum::<f64>().sqrt();
                 let normal = if length > 0. && length.is_finite() {

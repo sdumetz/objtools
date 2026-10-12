@@ -10,7 +10,10 @@ mod tmp;
 mod triangulate;
 mod vrml;
 
-use std::{env, path::PathBuf};
+use std::{
+    env,
+    path::{Path, PathBuf},
+};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args().skip(1).peekable();
     if args.peek().is_none() || matches!(args.peek().map(String::as_str), Some("--help" | "-h")) {
@@ -22,7 +25,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let mut input = None;
     let mut output = None;
-    let mut tmp_dir = env::temp_dir();
+    let mut tmp_dir = None;
     let mut center = false;
     let mut z_up = false;
     let mut progress = false;
@@ -39,7 +42,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     args.next().ok_or("--output requires a path")?,
                 ))
             }
-            "--tmp-dir" => tmp_dir = PathBuf::from(args.next().ok_or("--tmp-dir requires a path")?),
+            "--tmp-dir" => {
+                tmp_dir = Some(PathBuf::from(
+                    args.next().ok_or("--tmp-dir requires a path")?,
+                ))
+            }
             "--center" => center = true,
             "--up-axis" => {
                 z_up = match args.next().as_deref() {
@@ -89,6 +96,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let input = input.ok_or("Missing input file")?;
     let output = output.unwrap_or_else(|| input.with_extension("gltf"));
+    // Spools can exceed RAM, and the OS temporary directory is often RAM-backed (tmpfs).
+    let tmp_dir = tmp_dir.unwrap_or_else(|| {
+        let parent = output.parent().filter(|p| !p.as_os_str().is_empty());
+        parent.unwrap_or(Path::new(".")).to_owned()
+    });
     import::run(import::Options {
         input,
         output,
@@ -101,5 +113,5 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     })
 }
 fn help() {
-    println!("Usage: objtools import [OPTIONS] <file.obj|file.wrl|file.vrml>\n\nImport OBJ or VRML IndexedFaceSet geometry into glTF 2.0 + external .bin.\n\n  -o, --output FILE  Destination .gltf (default: input with .gltf extension)\n      --center       Subtract bounding-box center before float32 encoding\n      --up-axis AXIS Source up axis: y (default) or z; output is Y-up\n      --tmp-dir DIR  Disk-backed geometry spools (default: OS temporary directory)\n      --keep-tmp     Keep conversion workspace for debugging\n      --images MODE  auto (default), keep source references, or copy images\n      --convert-images BOOL  auto (default), true or false\n      --image-format FORMAT  jpg (default) or png\n      --image-quality N      JPG quality 1..100 (default: 95)\n      --progress     Report conversion progress on stderr\n  -h, --help         Show help");
+    println!("Usage: objtools import [OPTIONS] <file.obj|file.wrl|file.vrml>\n\nImport OBJ or VRML IndexedFaceSet geometry into glTF 2.0 + external .bin.\n\n  -o, --output FILE  Destination .gltf (default: input with .gltf extension)\n      --center       Subtract bounding-box center before float32 encoding\n      --up-axis AXIS Source up axis: y (default) or z; output is Y-up\n      --tmp-dir DIR  Disk-backed geometry spools (default: output directory)\n      --keep-tmp     Keep conversion workspace for debugging\n      --images MODE  auto (default), keep source references, or copy images\n      --convert-images BOOL  auto (default), true or false\n      --image-format FORMAT  jpg (default) or png\n      --image-quality N      JPG quality 1..100 (default: 95)\n      --progress     Report conversion progress on stderr\n  -h, --help         Show help");
 }

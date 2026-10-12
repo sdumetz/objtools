@@ -1,13 +1,15 @@
 //! OBJ decoding to random-access attribute spools and a sequential face spool.
+//! Spools are written sequentially, then memory-mapped for the random-access replay.
 use crate::{
     fixed::{parse_three_fixed, BBox},
     import::Res,
     material::{self, Material},
 };
+use memmap2::Mmap;
 use std::{
     collections::{HashMap, HashSet},
     fs::File,
-    io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write},
+    io::{BufRead, BufReader, BufWriter, Read, Write},
     path::Path,
 };
 pub const MAX_FACE: usize = 4096;
@@ -253,17 +255,23 @@ pub fn read_face(reader: &mut impl Read) -> Res<Option<(usize, usize, Vec<Corner
     }
     Ok(Some((object, material, corners)))
 }
-pub fn fetch<const N: usize>(file: &mut File, index: u64, count: u64) -> Res<[[u8; 8]; N]> {
+/// Map a finished spool read-only. Its pages are file-backed page cache: they stay resident
+/// while RAM is free and are evicted, not swapped, under memory pressure.
+pub fn map(path: &Path) -> Res<Mmap> {
+    // SAFETY: spools live in the private workspace and are complete before being mapped;
+    // nothing truncates or rewrites them while the mapping is alive.
+    Ok(unsafe { Mmap::map(&File::open(path)?)? })
+}
+pub fn fetch<const N: usize>(spool: &[u8], index: u64, count: u64) -> Res<[[u8; 8]; N]> {
     if index == 0 || index > count {
         return Err(format!("Index {index} outside attribute count {count}").into());
     }
-    let offset = (index - 1)
-        .checked_mul(N as u64 * 8)
-        .ok_or("Attribute offset overflow")?;
-    file.seek(SeekFrom::Start(offset))?;
-    assert!(N <= 3, "Attribute records have at most three components");
-    let mut record = [0; 24];
-    file.read_exact(&mut record[..N * 8])?;
-    let out = std::array::from_fn(|i| record[i * 8..i * 8 + 8].try_into().unwrap());
-    Ok(out)
+    let record = usize::try_from(index - 1)
+        .ok()
+        .and_then(|i| i.checked_mul(N * 8))
+        .and_then(|offset| spool.get(offset..)?.get(..N * 8))
+        .ok_or("Attribute spool is shorter than its record count")?;
+    Ok(std::array::from_fn(|i| {
+        record[i * 8..i * 8 + 8].try_into().unwrap()
+    }))
 }

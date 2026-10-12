@@ -18,7 +18,7 @@ objtools import [OPTIONS] <file.obj|file.wrl|file.vrml>
 -o, --output FILE  Destination .gltf (default: input with .gltf extension)
     --center       Subtract the whole-input bounding-box center
     --up-axis AXIS Source up axis: y (default) or z
-    --tmp-dir DIR  Workspace directory (default: OS temporary directory)
+    --tmp-dir DIR  Workspace directory (default: the output's directory)
     --keep-tmp     Preserve the workspace for debugging
     --images MODE  auto (default), keep or copy
     --convert-images BOOL  auto (default), true or false
@@ -42,13 +42,13 @@ The default assumes Y-up input. `--up-axis z` gives each mesh node a rotation ma
 
 ## Disk-backed conversion
 
-OBJ is read once into position/UV/normal spools and a sequential face spool. Negative indices are resolved when they appear; positive references are checked against final attribute counts. Fixed-width records allow referenced attributes to be retrieved by seeking without keeping the entire model in memory.
+OBJ is read once into position/UV/normal spools and a sequential face spool. Negative indices are resolved when they appear; positive references are checked against final attribute counts. Once written, the attribute spools are memory-mapped: fixed-width records make every referenced attribute a direct lookup, without a system call per corner and without owning the model on the heap.
 
 The replay pass triangulates polygons using ear clipping and builds primitives with at most 65,536 vertices and 65,536 triangles. Each chunk has a local `(position, UV, normal)` mapping, so seams are preserved. Bounding triangle count as well as vertex count prevents repeated faces from growing memory indefinitely. Vertices can be duplicated between chunks. No whole-object deduplication or global mesh optimization is performed.
 
-Working geometry memory is bounded by a chunk, a face and a capped 65,536-entry normal accumulator. Missing normals add one face replay pass and a 24-byte-per-source-position disk spool. JSON metadata grows with objects, materials and emitted primitives, and is currently retained in memory. The exporter supports a single object larger than RAM; it does not promise constant memory for arbitrarily many objects/primitives. OBJ lines and VRML tokens are limited to 1 MiB, VRML nesting to 1,024 levels, and polygons to 4,096 corners; oversized records are rejected explicitly.
+Heap memory for geometry is bounded by a chunk and a face. Missing normals add one face replay pass and a 24-byte-per-source-position disk spool, mapped read-write. Mapped spool pages are file-backed page cache: the kernel keeps them resident while RAM is free and evicts them back to the workspace files under pressure, so they show up in the process's resident size (RSS) and address space without being able to exhaust memory. JSON metadata grows with objects, materials and emitted primitives, and is currently retained in memory. The exporter supports a single object larger than RAM; it does not promise constant memory for arbitrarily many objects/primitives. OBJ lines and VRML tokens are limited to 1 MiB, VRML nesting to 1,024 levels, and polygons to 4,096 corners; oversized records are rejected explicitly.
 
-VRML uses the existing streaming IndexedFaceSet reader to make a temporary OBJ/MTL, then follows the same pipeline. This uses extra disk space and I/O but preserves the fixed-point coordinate path. Allow workspace space for the attribute/face spools, generated binary geometry and (for VRML) intermediate OBJ/MTL. Temporary files are removed on success or error unless `--keep-tmp` is set. Seek-heavy conversion benefits from an SSD.
+VRML uses the existing streaming IndexedFaceSet reader to make a temporary OBJ/MTL, then follows the same pipeline. This uses extra disk space and I/O but preserves the fixed-point coordinate path. Allow workspace space for the attribute/face spools, generated binary geometry and (for VRML) intermediate OBJ/MTL. Temporary files are removed on success or error unless `--keep-tmp` is set. The workspace defaults to the output's directory rather than the OS temporary directory, which is often RAM-backed (tmpfs) and would defeat the disk backing; keep `--tmp-dir` on a real disk. Random-access conversion benefits from an SSD once the spools outgrow free RAM. A disk that fills up while the smooth-normal spool is written through its mapping ends the process with a bus error (SIGBUS) instead of an error message.
 
 ## Materials: Phong to PBR
 
@@ -112,16 +112,12 @@ cargo clippy --all-targets -- -D warnings
 
 Tests cover coordinate precision, scientific notation, negative indices, UV seams, material parameters, mesh ranges, VRML defaults, concave polygons, chunk limits and output cleanup. The glTF writer uses Serde for metadata and a small binary writer, with no mesh-owning library or C/C++ dependency. CI builds and tests on Linux, macOS and Windows.
 
-Optional format validation and a larger-than-memory stress check:
+Optional format validation:
 
 ```sh
 npm install --prefix /tmp/objtools-validator gltf-validator
 NODE_PATH=/tmp/objtools-validator/node_modules node tools/validate_gltf.cjs terrain.gltf
-cargo build --release
-python3 tools/stress_import.py
 ```
-
-The Unix stress script generates a single object with nine million triangles, limits the importer to 64 MiB of address space, and verifies all triangles and chunk limits. It uses roughly 1 GiB of temporary disk space.
 
 For a real import with Linux process-memory monitoring:
 
@@ -130,4 +126,4 @@ python3 tools/monitor_import.py input.obj destination/model.gltf --center --prog
 NODE_PATH=/tmp/objtools-validator/node_modules node tools/validate_gltf_chunked.cjs destination/model.gltf /tmp/validation.json
 ```
 
-The monitor writes import logs, one-second RSS samples and a peak-memory report beside the model. The chunked validator checks the complete JSON structure, then every primitive's binary range and referenced images using Khronos's validator, without loading the entire binary file. The metadata pass defers external-resource I/O checks to the primitive passes.
+The monitor writes import logs, one-second RSS samples and a peak-memory report beside the model. RSS includes the mapped spools (evictable page cache); the anonymous figure is the importer's own heap. The chunked validator checks the complete JSON structure, then every primitive's binary range and referenced images using Khronos's validator, without loading the entire binary file. The metadata pass defers external-resource I/O checks to the primitive passes.
