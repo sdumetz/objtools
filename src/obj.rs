@@ -1,4 +1,5 @@
 //! OBJ decoding to random-access attribute spools and a sequential face spool.
+//! Vertex components glTF cannot carry are dropped with one warning per kind, never an error.
 //! Spools are written sequentially, then memory-mapped for the random-access replay.
 use crate::{
     fixed::{parse_three_fixed, BBox},
@@ -13,6 +14,17 @@ use std::{
     path::Path,
 };
 pub const MAX_FACE: usize = 4096;
+/// One `vc` record: linear RGB 1 1 1 as three little-endian f64.
+const WHITE: [u8; 24] = {
+    let one = 1f64.to_le_bytes();
+    let mut record = [0; 24];
+    let mut i = 0;
+    while i < 24 {
+        record[i] = one[i % 8];
+        i += 1;
+    }
+    record
+};
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub struct Corner {
     pub v: u64,
@@ -22,6 +34,8 @@ pub struct Corner {
 pub struct Scene {
     pub bbox: BBox,
     pub missing_normals: bool,
+    /// A `vc` spool holds one linear RGB record per position.
+    pub colors: bool,
     pub objects: Vec<String>,
     pub materials: Vec<Material>,
     pub counts: [u64; 3],
@@ -68,6 +82,20 @@ fn floats(rest: &str, count: usize) -> Res<Vec<f64>> {
     }
     Ok(out)
 }
+fn warn_once(warned: &mut HashSet<String>, key: &str, message: &str) {
+    if !warned.contains(key) {
+        warned.insert(key.to_owned());
+        eprintln!("Warning: {message}");
+    }
+}
+/// OBJ vertex colours are display (sRGB) values; glTF `COLOR_0` is linear.
+fn srgb_to_linear(c: f64) -> f64 {
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
 pub fn spool(source: &Path, dir: &Path, progress: bool, texture_base: Option<&Path>) -> Res<Scene> {
     let mut attrs = [
         BufWriter::new(File::create(dir.join("v"))?),
@@ -75,9 +103,12 @@ pub fn spool(source: &Path, dir: &Path, progress: bool, texture_base: Option<&Pa
         BufWriter::new(File::create(dir.join("vn"))?),
     ];
     let mut faces = BufWriter::new(File::create(dir.join("faces"))?);
+    // Created by the first coloured position, so files without colours pay nothing.
+    let mut colors: Option<BufWriter<File>> = None;
     let mut scene = Scene {
         bbox: BBox::new(),
         missing_normals: false,
+        colors: false,
         objects: vec!["default".into()],
         materials: vec![Material::new("default")],
         counts: [0; 3],
@@ -117,22 +148,64 @@ pub fn spool(source: &Path, dir: &Path, progress: bool, texture_base: Option<&Pa
             match key {
                 "v" => {
                     let coords = parse_three_fixed(rest)?;
-                    if rest.split_whitespace().count() != 3 {
-                        return Err("Only XYZ positions are supported (homogeneous coordinates/vertex colors unsupported)".into());
-                    }
                     scene.bbox.add(coords);
                     for n in coords {
                         attrs[0].write_all(&n.to_le_bytes())?;
                     }
                     scene.counts[0] += 1;
+                    // `x y z r g b [a]` is the de-facto colour extension, `x y z w` a rational weight.
+                    let mut extra = rest.split_whitespace().skip(3);
+                    let mut rgb = None;
+                    match extra.clone().count() {
+                        0 => {}
+                        1 => {
+                            if extra.next().unwrap().parse() != Ok(1.) {
+                                warn_once(&mut warned, "v w", "vertex weights (w) are omitted");
+                            }
+                        }
+                        n @ (3 | 4) => {
+                            let mut c = [0.; 3];
+                            for c in &mut c {
+                                let raw: f64 = extra.next().unwrap().parse()?;
+                                if !raw.is_finite() {
+                                    return Err("Non-finite attribute".into());
+                                }
+                                if !(0. ..=1.).contains(&raw) {
+                                    let message = "vertex colors outside [0,1] are clamped";
+                                    warn_once(&mut warned, "v range", message);
+                                }
+                                *c = srgb_to_linear(raw.clamp(0., 1.));
+                            }
+                            rgb = Some(c);
+                            if n == 4 {
+                                warn_once(&mut warned, "v alpha", "vertex color alpha is omitted");
+                            }
+                        }
+                        _ => {
+                            let message = "unrecognized extra v components are omitted";
+                            warn_once(&mut warned, "v extra", message);
+                        }
+                    }
+                    // Positions without a colour are white, which leaves the material unchanged.
+                    let mut backfill = 0;
+                    if rgb.is_some() && colors.is_none() {
+                        colors = Some(BufWriter::new(File::create(dir.join("vc"))?));
+                        backfill = scene.counts[0] - 1;
+                    }
+                    if let Some(writer) = colors.as_mut() {
+                        for _ in 0..backfill {
+                            writer.write_all(&WHITE)?;
+                        }
+                        for n in rgb.unwrap_or([1.; 3]) {
+                            writer.write_all(&n.to_le_bytes())?;
+                        }
+                    }
                 }
                 "vt" => {
                     let nums = floats(rest, 1)?;
-                    if nums.len() > 3 {
-                        return Err("Too many UV components".into());
-                    }
-                    if nums.get(2).is_some_and(|n| *n != 0.) {
-                        return Err("3D texture coordinates are unsupported".into());
+                    if nums.iter().skip(2).any(|n| *n != 0.) {
+                        let message = "texture coordinates beyond u v are omitted";
+                        warn_once(&mut warned, "vt w", message);
                     }
                     for n in [nums[0], *nums.get(1).unwrap_or(&0.)] {
                         attrs[1].write_all(&n.to_le_bytes())?;
@@ -216,6 +289,10 @@ pub fn spool(source: &Path, dir: &Path, progress: bool, texture_base: Option<&Pa
         writer.flush()?;
     }
     faces.flush()?;
+    if let Some(mut writer) = colors {
+        writer.flush()?;
+        scene.colors = true;
+    }
     for m in &mut scene.materials {
         if let Some(def) = definitions.remove(&m.name) {
             *m = def;

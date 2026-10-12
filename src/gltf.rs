@@ -23,16 +23,19 @@ struct Chunk {
     object: usize,
     material: usize,
     uv: bool,
+    color: bool,
     map: HashMap<Key, u32>,
-    vertices: Vec<[f32; 8]>,
+    // Position, normal, UV, colour; the last two are only written when the chunk has them.
+    vertices: Vec<[f32; 11]>,
     indices: Vec<u32>,
 }
 impl Chunk {
-    fn new(object: usize, material: usize, uv: bool) -> Self {
+    fn new(object: usize, material: usize, uv: bool, color: bool) -> Self {
         Self {
             object,
             material,
             uv,
+            color,
             map: HashMap::new(),
             vertices: Vec::new(),
             indices: Vec::new(),
@@ -68,7 +71,9 @@ impl Document {
         if chunk.indices.is_empty() {
             return Ok(());
         }
-        let stride = if chunk.uv { 32 } else { 24 };
+        let uv_end = if chunk.uv { 8 } else { 6 };
+        let color_start = if chunk.color { 8 } else { 11 };
+        let stride = (uv_end + 11 - color_start) * 4;
         let start = self.offset;
         let mut min = [f32::INFINITY; 3];
         let mut max = [f32::NEG_INFINITY; 3];
@@ -77,7 +82,7 @@ impl Document {
                 min[i] = min[i].min(v[i]);
                 max[i] = max[i].max(v[i]);
             }
-            for n in &v[..stride / 4] {
+            for n in v[..uv_end].iter().chain(&v[color_start..]) {
                 out.write_all(&n.to_le_bytes())?;
             }
         }
@@ -98,6 +103,11 @@ impl Document {
         if chunk.uv {
             attributes["TEXCOORD_0"] =
                 json!(self.accessor(view, 24, 5126, chunk.vertices.len(), "VEC2", None));
+        }
+        if chunk.color {
+            let offset = uv_end as u64 * 4;
+            attributes["COLOR_0"] =
+                json!(self.accessor(view, offset, 5126, chunk.vertices.len(), "VEC3", None));
         }
         for i in &chunk.indices {
             out.write_all(&i.to_le_bytes())?;
@@ -177,6 +187,11 @@ pub fn write(scene: Scene, dir: &Path, options: &crate::import::Options) -> Res<
         obj::map(&dir.join("vt"))?,
         obj::map(&dir.join("vn"))?,
     ];
+    let colors = if scene.colors {
+        Some(obj::map(&dir.join("vc"))?)
+    } else {
+        None
+    };
     let smooth = if scene.missing_normals {
         Some(crate::smooth::generate(&scene, &attrs[0], dir, progress)?)
     } else {
@@ -196,8 +211,9 @@ pub fn write(scene: Scene, dir: &Path, options: &crate::import::Options) -> Res<
     // Build payload in the private workspace before touching output paths.
     let bin_spool = dir.join("payload.bin");
     let mut binary = BufWriter::with_capacity(256 * 1024, File::create(&bin_spool)?);
-    let mut chunk = Chunk::new(0, 0, false);
+    let mut chunk = Chunk::new(0, 0, false, false);
     let mut face_count = 0u64;
+    let mut textured_colors = 0u64;
     let mut skipped_degenerate = 0u64;
     let mut repaired_normals = 0u64;
     while let Some((object, material, corners)) = obj::read_face(&mut faces)? {
@@ -215,9 +231,13 @@ pub fn write(scene: Scene, dir: &Path, options: &crate::import::Options) -> Res<
         {
             return Err(format!("Face {face_count} mixes missing and present UVs/normals").into());
         }
+        // glTF multiplies COLOR_0 into the base colour, which would tint a texture twice.
+        let textured = scene.materials[material].texture.is_some();
+        let color = colors.as_ref().filter(|_| !textured);
+        textured_colors += u64::from(colors.is_some() && textured);
         if chunk.object != object || chunk.material != material || chunk.uv != uv {
             document.flush(&mut chunk, &mut binary)?;
-            chunk = Chunk::new(object, material, uv);
+            chunk = Chunk::new(object, material, uv, color.is_some());
         }
         let mut positions = Vec::with_capacity(corners.len());
         let mut vertices = Vec::with_capacity(corners.len());
@@ -227,7 +247,7 @@ pub fn write(scene: Scene, dir: &Path, options: &crate::import::Options) -> Res<
                 ((raw[i] as i128 - origin[i] as i128) as f64) / (SCALE as f64)
             });
             positions.push(p);
-            let mut v = [0f32; 8];
+            let mut v = [0f32; 11];
             for i in 0..3 {
                 v[i] = p[i] as f32;
             }
@@ -249,6 +269,12 @@ pub fn write(scene: Scene, dir: &Path, options: &crate::import::Options) -> Res<
                 let t = obj::fetch::<2>(&attrs[1], c.vt, scene.counts[1])?.map(f64::from_le_bytes);
                 v[6] = t[0] as f32;
                 v[7] = (1. - t[1]) as f32;
+            }
+            if let Some(colors) = color {
+                let rgb = obj::fetch::<3>(colors, c.v, scene.counts[0])?.map(f64::from_le_bytes);
+                for i in 0..3 {
+                    v[i + 8] = rgb[i] as f32;
+                }
             }
             if v.iter().any(|x| !x.is_finite()) {
                 return Err("Attribute exceeds float32 range".into());
@@ -319,6 +345,9 @@ pub fn write(scene: Scene, dir: &Path, options: &crate::import::Options) -> Res<
     document.flush(&mut chunk, &mut binary)?;
     if repaired_normals > 0 {
         eprintln!("Warning: generated smooth normals for {repaired_normals} corners with zero-length source normals");
+    }
+    if textured_colors > 0 {
+        eprintln!("Warning: omitted vertex colors on {textured_colors} textured faces, where they would tint the texture");
     }
     if skipped_degenerate > 0 {
         eprintln!("Warning: skipped {skipped_degenerate} degenerate triangles");

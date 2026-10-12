@@ -620,3 +620,80 @@ fn zero_source_normals_are_smoothed_and_degenerate_triangles_skipped() {
     assert!((normals[0][1] - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-6);
     assert!((normals[0][2] - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-6);
 }
+
+#[test]
+fn vertex_colors_become_linear_color_0_except_under_textures() {
+    let f = Fixture::new();
+    // Header-only PNG, as in z_up_rotation_and_texture_publication.
+    let png = [
+        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6,
+        0, 0, 0, 0, 0, 0, 0,
+    ];
+    fs::write(f.0.join("albedo.png"), png).unwrap();
+    f.file(
+        "in.mtl",
+        "newmtl plain\nKd 1 1 1\nnewmtl photo\nmap_Kd albedo.png\n",
+    );
+    // The first position has no colour: it is back-filled as white once colours appear.
+    f.file("in.obj", "mtllib in.mtl\nv 0 0 0\nv 1 0 0 1 0.5 0\nv 0 1 0 0.2 0.04045 1 0.5\nvt 0 0\nvt 1 0\nvt 0 1\nusemtl plain\nf 1 2 3\nf 1/1 2/2 3/3\nusemtl photo\nf 1/1 2/2 3/3\n");
+    let result = f.import("in.obj", false);
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(result.status.success(), "{stderr}");
+    assert!(stderr.contains("vertex color alpha is omitted"), "{stderr}");
+    assert!(
+        stderr.contains("omitted vertex colors on 1 textured faces"),
+        "{stderr}"
+    );
+    let (root, bin) = f.result();
+    let primitives = root["meshes"][0]["primitives"].as_array().unwrap();
+    assert_eq!(primitives.len(), 3);
+    // Position+normal+colour, then the same with UVs in between.
+    for (primitive, stride) in primitives.iter().zip([36, 44]) {
+        let accessor = primitive["attributes"]["COLOR_0"].as_u64().unwrap() as usize;
+        assert_eq!(root["accessors"][accessor]["type"], "VEC3");
+        let view = root["accessors"][accessor]["bufferView"].as_u64().unwrap() as usize;
+        assert_eq!(root["bufferViews"][view]["byteStride"], stride);
+        let colors = floats(&root, &bin, accessor, 3);
+        assert_eq!(colors[0], vec![1., 1., 1.]);
+        assert_eq!(colors[1][0], 1.);
+        assert!((colors[1][1] - 0.21404114).abs() < 1e-6);
+        assert_eq!(colors[1][2], 0.);
+        assert!((colors[2][0] - 0.03310477).abs() < 1e-6);
+        assert!((colors[2][1] - 0.04045 / 12.92).abs() < 1e-7);
+        let position = primitive["attributes"]["POSITION"].as_u64().unwrap() as usize;
+        assert_eq!(floats(&root, &bin, position, 3)[2], vec![0., 1., 0.]);
+    }
+    let uv = primitives[1]["attributes"]["TEXCOORD_0"].as_u64().unwrap() as usize;
+    assert_eq!(floats(&root, &bin, uv, 2)[1], vec![1., 1.]);
+    assert!(primitives[2]["attributes"]["COLOR_0"].is_null());
+    assert!(primitives[2]["attributes"]["TEXCOORD_0"].is_u64());
+}
+
+#[test]
+fn unportable_vertex_components_warn_instead_of_failing() {
+    let f = Fixture::new();
+    f.file("in.obj", "v 0 0 0 1\nv 2 0 0 0.5\nv 0 2 0 1 2 3 4 5\nv 0 0 2 -1 0.5 255\nvt 0 0 0\nvt 1 0 0.5\nvt 0 1\nvt 1 1\nf 1/1 2/2 3/3\nf 1/1 2/2 4/4\n");
+    let result = f.import("in.obj", false);
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(result.status.success(), "{stderr}");
+    for warning in [
+        "vertex weights (w) are omitted",
+        "unrecognized extra v components are omitted",
+        "vertex colors outside [0,1] are clamped",
+        "texture coordinates beyond u v are omitted",
+    ] {
+        assert_eq!(stderr.matches(warning).count(), 1, "{warning}: {stderr}");
+    }
+    let (root, bin) = f.result();
+    let primitive = &root["meshes"][0]["primitives"][0];
+    let position = primitive["attributes"]["POSITION"].as_u64().unwrap() as usize;
+    // The weight is not applied as a divisor.
+    assert_eq!(floats(&root, &bin, position, 3)[1], vec![2., 0., 0.]);
+    let uv = primitive["attributes"]["TEXCOORD_0"].as_u64().unwrap() as usize;
+    assert_eq!(floats(&root, &bin, uv, 2)[1], vec![1., 1.]);
+    let color = primitive["attributes"]["COLOR_0"].as_u64().unwrap() as usize;
+    let colors = floats(&root, &bin, color, 3);
+    assert_eq!(colors[2], vec![1., 1., 1.]);
+    assert_eq!(colors[3][0], 0.);
+    assert_eq!(colors[3][2], 1.);
+}
