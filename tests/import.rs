@@ -690,6 +690,38 @@ fn png_conversion_preserves_alpha_and_jpg_composites_white() {
 }
 
 #[test]
+fn awkward_polygons_triangulate_instead_of_aborting() {
+    let f = Fixture::new();
+    // A triangle written as a quad, a keyhole (a square with a square hole), four collinear
+    // corners, and a self-intersecting pentagon.
+    f.file(
+        "in.obj",
+        "v 0 0 0\nv 4 0 0\nv 4 4 0\nv 0 4 0\nv 1 1 0\nv 1 3 0\nv 3 3 0\nv 3 1 0\n\
+         v 1 0 0\nv 2 0 0\nv 3 0 0\n\
+         v 1 2 1\nv 2 2 1\nv 1 3 1\nv 4 0 1\nv 0 3 1\n\
+         f 1 2 3 3\nf 1 2 3 4 1 5 6 7 8 5\nf 1 9 10 11\nf 12 13 14 15 16\n",
+    );
+    let result = f.import("in.obj", false);
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(result.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("skipped 1 faces with zero area"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("triangulated 1 self-intersecting"),
+        "{stderr}"
+    );
+    let (root, _) = f.result();
+    let p = &root["meshes"][0]["primitives"][0];
+    // 1 + 8 + 2: the pentagon's third triangle has no area.
+    assert_eq!(
+        root["accessors"][p["indices"].as_u64().unwrap() as usize]["count"],
+        3 * 11
+    );
+}
+
+#[test]
 fn zero_source_normals_are_smoothed_and_degenerate_triangles_skipped() {
     let f = Fixture::new();
     f.file("in.obj","v 0 0 0\nv 1 0 0\nv 0 1 0\nv 0 0 1\nvn 0 0 0\nf 1//1 2//1 3//1\nf 1//1 4//1 2//1\nf 1//1 1//1 2//1\n");
@@ -700,7 +732,7 @@ fn zero_source_normals_are_smoothed_and_degenerate_triangles_skipped() {
         String::from_utf8_lossy(&result.stderr)
     );
     assert!(String::from_utf8_lossy(&result.stderr).contains("zero-length source normals"));
-    assert!(String::from_utf8_lossy(&result.stderr).contains("skipped 1 degenerate triangles"));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("skipped 1 faces with zero area"));
     let (root, bin) = f.result();
     let p = &root["meshes"][0]["primitives"][0];
     assert_eq!(

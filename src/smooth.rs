@@ -40,12 +40,11 @@ pub fn generate(scene: &Scene, positions: &[u8], dir: &Path, progress: bool) -> 
                 (raw[i] as i128 - anchor[i] as i128) as f64 / SCALE as f64
             }));
         }
-        if triangulate::is_degenerate_triangle(&points) {
+        // The same triangles as the geometry pass, so faces of zero area weigh nothing here either.
+        let Some(polygon) = triangulate::triangulate(&points) else {
             continue;
-        }
-        let (triangles, _) =
-            triangulate::triangulate(&points).map_err(|e| format!("Face {count}: {e}"))?;
-        for [a, b, c] in triangles {
+        };
+        for [a, b, c] in polygon.triangles {
             let u: [f64; 3] = std::array::from_fn(|i| points[b][i] - points[a][i]);
             let v: [f64; 3] = std::array::from_fn(|i| points[c][i] - points[a][i]);
             let normal = [

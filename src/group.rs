@@ -19,8 +19,7 @@ pub struct Group {
 }
 /// Validate every face and return the keys in first-appearance order, with the spool's faces
 /// rearranged so that each key's faces are contiguous and in that order.
-/// The flag tells whether the spool was rewritten, so face numbers no longer follow the file.
-pub fn group(scene: &Scene, dir: &Path, progress: bool) -> Res<(Vec<Group>, bool)> {
+pub fn group(scene: &Scene, dir: &Path, progress: bool) -> Res<Vec<Group>> {
     let path = dir.join("faces");
     let mut faces = BufReader::with_capacity(256 * 1024, File::open(&path)?);
     let mut groups: Vec<Group> = Vec::new();
@@ -56,7 +55,7 @@ pub fn group(scene: &Scene, dir: &Path, progress: bool) -> Res<(Vec<Group>, bool
         groups[id].bytes += 12 + 24 * corners.len() as u64;
     }
     if !interleaved {
-        return Ok((groups, false));
+        return Ok(groups);
     }
     if progress {
         eprintln!("Grouping {count} faces by object and material");
@@ -91,5 +90,5 @@ pub fn group(scene: &Scene, dir: &Path, progress: bool) -> Res<(Vec<Group>, bool
     drop(file);
     drop(faces);
     fs::rename(&sorted_path, &path)?;
-    Ok((groups, true))
+    Ok(groups)
 }

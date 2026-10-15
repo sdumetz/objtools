@@ -195,7 +195,7 @@ fn write_with_limit(
     max_vertices: u64,
 ) -> Res<()> {
     // Validates faces before any image conversion or geometry work.
-    let (groups, regrouped) = crate::group::group(&scene, dir, options.progress)?;
+    let groups = crate::group::group(&scene, dir, options.progress)?;
     let output = &options.output;
     let center = options.center;
     let z_up = options.z_up;
@@ -258,6 +258,7 @@ fn write_with_limit(
     let mut face_count = 0u64;
     let mut textured_colors = 0u64;
     let mut skipped_degenerate = 0u64;
+    let mut forced_polygons = 0u64;
     let mut repaired_normals = 0u64;
     let mut splits = 0u64;
     let mut local = Vec::new();
@@ -329,18 +330,12 @@ fn write_with_limit(
                 p[i] -= anchor[i];
             }
         }
-        if triangulate::is_degenerate_triangle(&positions) {
+        let Some(polygon) = triangulate::triangulate(&positions) else {
             skipped_degenerate += 1;
             continue;
-        }
-        let (triangles, flat) = triangulate::triangulate(&positions).map_err(|e| {
-            if regrouped {
-                let names = (&scene.objects[object], &scene.materials[material].name);
-                format!("Face of object {} with material {}: {e}", names.0, names.1)
-            } else {
-                format!("Face {face_count}: {e}")
-            }
-        })?;
+        };
+        forced_polygons += u64::from(polygon.forced);
+        let flat = polygon.normal;
         // A corner falling back to its face's flat normal has a normal of its own: never shared.
         let mut own = vec![false; corners.len()];
         for ((corner, v), own) in corners.iter().zip(&mut vertices).zip(&mut own) {
@@ -367,7 +362,7 @@ fn write_with_limit(
         }
         local.clear();
         local.resize(corners.len(), None);
-        for triangle in triangles {
+        for triangle in polygon.triangles {
             for i in triangle {
                 let index = match local[i] {
                     Some(index) => index,
@@ -411,7 +406,10 @@ fn write_with_limit(
         eprintln!("Warning: omitted vertex colors on {textured_colors} textured faces, where they would tint the texture");
     }
     if skipped_degenerate > 0 {
-        eprintln!("Warning: skipped {skipped_degenerate} degenerate triangles");
+        eprintln!("Warning: skipped {skipped_degenerate} faces with zero area");
+    }
+    if forced_polygons > 0 {
+        eprintln!("Warning: triangulated {forced_polygons} self-intersecting or otherwise non-simple faces by forced ear clipping; their triangles may overlap");
     }
     binary.flush()?;
     drop(binary);
