@@ -1,3 +1,4 @@
+mod coverage;
 mod dedup;
 mod fixed;
 mod format;
@@ -5,6 +6,7 @@ mod gltf;
 mod group;
 mod images;
 mod import;
+mod inspect;
 mod material;
 mod obj;
 mod smooth;
@@ -18,13 +20,51 @@ use std::{
 };
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args().skip(1).peekable();
-    if args.peek().is_none() || matches!(args.peek().map(String::as_str), Some("--help" | "-h")) {
-        help();
-        return Ok(());
+    match args.next().as_deref() {
+        None | Some("--help" | "-h") => {
+            help();
+            Ok(())
+        }
+        Some("import") => import(args),
+        Some("inspect") => inspect(args),
+        Some(other) => {
+            Err(format!("Unknown command {other}. Run objtools --help for usage.").into())
+        }
     }
-    if args.next().as_deref() != Some("import") {
-        return Err("Only `import` is supported. Run objtools --help for usage.".into());
+}
+fn inspect(args: impl Iterator<Item = String>) -> Result<(), Box<dyn std::error::Error>> {
+    let mut args = args;
+    let mut input = None;
+    let mut tmp_dir = None;
+    let mut progress = false;
+    let mut keep_tmp = false;
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--help" | "-h" => {
+                inspect_help();
+                return Ok(());
+            }
+            "--tmp-dir" => {
+                tmp_dir = Some(PathBuf::from(
+                    args.next().ok_or("--tmp-dir requires a path")?,
+                ))
+            }
+            "--progress" => progress = true,
+            "--keep-tmp" => keep_tmp = true,
+            _ if arg.starts_with('-') => return Err(format!("Unknown option: {arg}").into()),
+            _ if input.is_none() => input = Some(PathBuf::from(arg)),
+            _ => return Err(format!("Unexpected argument: {arg}").into()),
+        }
     }
+    inspect::run(inspect::Options {
+        input: input.ok_or("Missing input file")?,
+        tmp_dir,
+        keep_tmp,
+        progress,
+    })
+}
+fn import(args: impl Iterator<Item = String>) -> Result<(), Box<dyn std::error::Error>> {
+    let mut args = args;
     let mut input = None;
     let mut output = None;
     let mut tmp_dir = None;
@@ -36,7 +76,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--help" | "-h" => {
-                help();
+                import_help();
                 return Ok(());
             }
             "-o" | "--output" => {
@@ -112,8 +152,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         progress,
         keep_tmp,
         images,
+        quiet: false,
     })
 }
 fn help() {
+    println!("Usage: objtools <COMMAND> [OPTIONS] <file>\n\nCommands:\n  import   Convert OBJ or VRML to glTF 2.0 + external .bin\n  inspect  Report vertex, face and diffuse texture statistics\n\nRun objtools <COMMAND> --help for its options.");
+}
+fn inspect_help() {
+    println!("Usage: objtools inspect [OPTIONS] <file.gltf|file.obj|file.wrl|file.vrml>\n\nReport the vertex and face counts, diffuse texel count and texture occupancy of a\nmodel. OBJ and VRML are imported into a temporary workspace first, so the figures are\nthose of the glTF that `objtools import` would write.\n\n      --tmp-dir DIR  Workspace for the import and coverage maps (default: input directory)\n      --keep-tmp     Keep the workspace for debugging\n      --progress     Report progress on stderr\n  -h, --help         Show help");
+}
+fn import_help() {
     println!("Usage: objtools import [OPTIONS] <file.obj|file.wrl|file.vrml>\n\nImport OBJ or VRML IndexedFaceSet geometry into glTF 2.0 + external .bin.\n\n  -o, --output FILE  Destination .gltf (default: input with .gltf extension)\n      --center       Subtract bounding-box center before float32 encoding\n      --up-axis AXIS Source up axis: y (default) or z; output is Y-up\n      --tmp-dir DIR  Disk-backed geometry spools (default: output directory)\n      --keep-tmp     Keep conversion workspace for debugging\n      --images MODE  auto (default), keep source references, or copy images\n      --convert-images BOOL  auto (default), true or false\n      --image-format FORMAT  jpg (default) or png\n      --image-quality N      JPG quality 1..100 (default: 95)\n      --progress     Report conversion progress on stderr\n  -h, --help         Show help");
 }

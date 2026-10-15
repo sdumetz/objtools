@@ -6,9 +6,10 @@ A Rust command-line importer for very large OBJ and VRML meshes, including geore
 cargo build --release
 objtools import terrain.obj --center -o terrain.gltf
 objtools import terrain.wrl --center --up-axis z -o terrain.gltf
+objtools inspect terrain.obj
 ```
 
-The CLI has one command, `import`. The previous `inspect`, `translate`, `repair` and `split` commands have been removed; VRML-to-OBJ is now an internal adapter.
+The CLI has two commands: `import` converts to glTF, and `inspect` reports model statistics. The previous `translate`, `repair` and `split` commands have been removed; VRML-to-OBJ is now an internal adapter.
 
 ## Usage
 
@@ -29,6 +30,38 @@ objtools import [OPTIONS] <file.obj|file.wrl|file.vrml>
 ```
 
 Output directories must already exist. Existing output files are never overwritten. A failed import removes only output files it created. Geometry is assembled in a private workspace before publication, and JSON is written last. Publication of multiple files is not an atomic filesystem transaction.
+
+## Inspect
+
+```text
+objtools inspect [OPTIONS] <file.gltf|file.obj|file.wrl|file.vrml>
+
+    --tmp-dir DIR  Workspace for the import and coverage maps (default: the input's directory)
+    --keep-tmp     Preserve the workspace for debugging
+    --progress     Report progress on stderr
+-h, --help         Show help
+```
+
+```text
+Vertices:           2.25M
+Faces:              4.37M
+Diffuse texels:     268M in 1 texture
+Texture occupancy:  0.018
+
+Texture                                        Size  Occupancy
+Arc_de_Triomphe_FULL_u1_v1_diffuse.png  16384x16384  0.018
+```
+
+Statistics are always those of a glTF. OBJ and VRML inputs are first imported into a private workspace, exactly as `objtools import` would convert them, and the temporary glTF is inspected and deleted, so `inspect model.obj` and `inspect model.gltf` after an import report the same figures. Import warnings still reach stderr. Texture images are referenced in place, without conversion, so any format the import accepts can be measured. Nothing is written beside the input except the workspace.
+
+- **Vertices** are glTF vertices: one per distinct position/UV/normal combination within a primitive. This is what a renderer uploads. It exceeds the source position count only where glTF requires it: at UV and normal seams, and where a position is used by several materials, since each material is its own primitive. Each mesh counts once, and a POSITION accessor shared by several primitives counts once.
+- **Faces** are triangles after triangulation; degenerate faces skipped by import are not counted. Triangle strips and fans count `n - 2`; point and line primitives count none.
+- **Diffuse texels** are the width × height of every image used as a material's base-colour texture, each image once.
+- **Texture occupancy** is the fraction of those texels that some UV triangle overlaps, counting overlapping triangles once. Padding and unused atlas space are excluded. A texel counts when a triangle overlaps it at all (conservative rasterization), including a chart's partially covered border texels, which bilinear filtering samples. The global figure is used texels over total texels; each image also reports its own size and occupancy. Sampler wrap modes (repeat, mirrored repeat, clamp) are applied. A triangle that repeats its texture more than 64 times vertically is left out with a warning.
+
+Large figures use SI multipliers (k, M, G, T) with three significant digits.
+
+Coverage is one bit per texel in a sparse workspace file per image, memory-mapped like the import spools (32 MiB for a 16k × 16k texture). Buffers are mapped read-only, and image sizes come from file headers without decoding pixels. glTF support covers what objtools writes and the common core: external `.bin` buffers, indexed or non-indexed triangle primitives, float or normalized integer UVs, and `TEXCOORD_n` chosen by `texCoord`. Embedded `data:` URIs, `.glb`, sparse accessors and `KHR_texture_transform` are rejected explicitly.
 
 ## Georeferenced coordinates
 
@@ -114,7 +147,7 @@ cargo test --locked
 cargo clippy --all-targets -- -D warnings
 ```
 
-Tests cover coordinate precision, scientific notation, negative indices, UV seams, material parameters, mesh ranges, VRML defaults, concave polygons, one primitive per material under shuffled and interleaved face orders, 16/32-bit index selection and output cleanup. The glTF writer uses Serde for metadata and a small binary writer, with no mesh-owning library or C/C++ dependency. CI builds and tests on Linux, macOS and Windows.
+Tests cover coordinate precision, scientific notation, negative indices, UV seams, material parameters, mesh ranges, VRML defaults, concave polygons, one primitive per material under shuffled and interleaved face orders, 16/32-bit index selection, output cleanup, inspect reports matching across OBJ and imported glTF, and texel coverage against a brute-force overlap test. The glTF writer uses Serde for metadata and a small binary writer, with no mesh-owning library or C/C++ dependency. CI builds and tests on Linux, macOS and Windows.
 
 Optional format validation:
 

@@ -15,6 +15,8 @@ pub struct Options {
     pub progress: bool,
     pub keep_tmp: bool,
     pub images: crate::images::Options,
+    /// Only warnings reach stderr; `inspect` imports into a workspace nobody will look at.
+    pub quiet: bool,
 }
 // Private disk-backed adapter used by the VRML reader.
 pub struct ImportOptions {
@@ -24,9 +26,21 @@ pub struct ImportOptions {
     pub keep_tmp: bool,
     pub progress: bool,
 }
-struct Workspace {
-    path: PathBuf,
+/// A private directory removed on drop, including when a command bails out early.
+pub struct Workspace {
+    pub path: PathBuf,
     keep: bool,
+}
+impl Workspace {
+    pub fn create(tmp_dir: &std::path::Path, keep: bool) -> Res<Self> {
+        let path = tmp_dir.join(format!(
+            "objtools-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&path)?;
+        Ok(Self { path, keep })
+    }
 }
 impl Drop for Workspace {
     fn drop(&mut self) {
@@ -53,16 +67,7 @@ pub fn run(opts: Options) -> Res<()> {
     if opts.output.exists() || opts.output.with_extension("bin").exists() {
         return Err("Output .gltf or .bin already exists; choose a new output path".into());
     }
-    let path = opts.tmp_dir.join(format!(
-        "objtools-{}-{}",
-        std::process::id(),
-        SEQ.fetch_add(1, Ordering::Relaxed)
-    ));
-    fs::create_dir(&path)?;
-    let workspace = Workspace {
-        path,
-        keep: opts.keep_tmp,
-    };
+    let workspace = Workspace::create(&opts.tmp_dir, opts.keep_tmp)?;
     let source = if ext == "obj" {
         opts.input.clone()
     } else {

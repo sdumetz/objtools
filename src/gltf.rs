@@ -212,12 +212,15 @@ fn write_with_limit(
     } else {
         [0; 3]
     };
-    eprintln!("Origin: {}", format_triple(origin));
-    eprintln!(
-        "Bounds: {} (size {})",
-        scene.bbox.range_str().unwrap_or_default(),
-        scene.bbox.size_str().unwrap_or_default()
-    );
+    let quiet = options.quiet;
+    if !quiet {
+        eprintln!("Origin: {}", format_triple(origin));
+        eprintln!(
+            "Bounds: {} (size {})",
+            scene.bbox.range_str().unwrap_or_default(),
+            scene.bbox.size_str().unwrap_or_default()
+        );
+    }
     let attrs = [
         obj::map(&dir.join("v"))?,
         obj::map(&dir.join("vt"))?,
@@ -414,7 +417,7 @@ fn write_with_limit(
     if document.offset == 0 {
         return Err("Input contains no supported triangle geometry".into());
     }
-    if !center {
+    if !center && !quiet {
         eprintln!("Note: coordinates were encoded as float32 without recentering; use --center for georeferenced assets");
     }
     let mut outputs = Outputs {
@@ -517,12 +520,14 @@ fn write_with_limit(
     dst.flush()?;
     drop(dst);
     outputs.committed = true;
-    eprintln!(
-        "Wrote {} ({face_count} faces, {} meshes, {} bytes of geometry)",
-        output.display(),
-        root["meshes"].as_array().unwrap().len(),
-        document.offset
-    );
+    if !quiet {
+        eprintln!(
+            "Wrote {} ({face_count} faces, {} meshes, {} bytes of geometry)",
+            output.display(),
+            root["meshes"].as_array().unwrap().len(),
+            document.offset
+        );
+    }
     Ok(())
 }
 #[cfg(test)]
@@ -549,6 +554,7 @@ mod tests {
             progress: false,
             keep_tmp: false,
             images: Default::default(),
+            quiet: true,
         };
         let scene = obj::spool(&input, &dir, false, None).unwrap();
         write_with_limit(scene, &dir, &options, limit).unwrap();

@@ -12,6 +12,9 @@ pub enum Mode {
     Auto,
     Keep,
     Copy,
+    /// Internal to `inspect`: reference every source image as-is, whatever its format, without
+    /// conversion or validation. The glTF is never published, only read back.
+    Reference,
 }
 impl Mode {
     pub fn parse(s: &str) -> Res<Self> {
@@ -119,6 +122,16 @@ pub fn prepare(
         if plans.contains_key(&source) {
             continue;
         }
+        if let Mode::Reference = options.mode {
+            let plan = Plan {
+                content: source.clone(),
+                publish_name: None,
+                uri: relative_uri(&source, &destination)?,
+                alpha: false,
+            };
+            plans.insert(source, plan);
+            continue;
+        }
         let ext = source
             .extension()
             .and_then(|e| e.to_str())
@@ -132,7 +145,7 @@ pub fn prepare(
         let copy = convert
             || match options.mode {
                 Mode::Auto => !same_folder,
-                Mode::Keep => false,
+                Mode::Keep | Mode::Reference => false,
                 Mode::Copy => true,
             };
         let output_ext = if convert {
