@@ -2,7 +2,7 @@
 //! so every input reports exactly what `objtools import` would produce. Buffers are mapped, and
 //! texel coverage lives in mapped workspace files: nothing whole-model is held on the heap.
 use crate::{
-    coverage::{Coverage, Wrap},
+    coverage::{Coverage, Filter, Wrap},
     format::fmt_count,
     import::{Res, Workspace},
 };
@@ -313,13 +313,16 @@ fn inspect(path: &Path, display_base: &Path, workspace: &Path, progress: bool) -
             return Err("KHR_texture_transform is unsupported".into());
         }
         let texture = element(&root, "textures", index(&info["index"], "texture")?)?;
-        let wrap = match texture["sampler"].as_u64() {
+        // A missing sampler means repeat wrapping and engine-default (linear) filtering.
+        let (wrap, filter) = match texture["sampler"].as_u64() {
             Some(id) => {
                 let sampler = element(&root, "samplers", usize::try_from(id)?)?;
                 let mode = |key: &str| Wrap::from_gl(sampler[key].as_u64().unwrap_or(10497));
-                [mode("wrapS")?, mode("wrapT")?]
+                let filter =
+                    Filter::from_gl(sampler["magFilter"].as_u64(), sampler["minFilter"].as_u64());
+                ([mode("wrapS")?, mode("wrapT")?], filter)
             }
-            None => [Wrap::Repeat; 2],
+            None => ([Wrap::Repeat; 2], Filter::Linear),
         };
         let image = index(&texture["source"], "texture source image")?;
         let target = &mut textures.get_mut(&image).unwrap().coverage;
@@ -345,7 +348,7 @@ fn inspect(path: &Path, display_base: &Path, workspace: &Path, progress: bool) -
                 _ => [0, t + 1, t + 2],
             };
             let tri = [corner(ks[0])?, corner(ks[1])?, corner(ks[2])?];
-            skipped += u64::from(!target.triangle(tri, wrap)?);
+            skipped += u64::from(!target.triangle(tri, wrap, filter)?);
             rasterized += 1;
             if progress && rasterized.is_multiple_of(10_000_000) {
                 eprintln!(

@@ -1,6 +1,8 @@
 //! Texel coverage of UV triangles: one bit per texel in a sparse, memory-mapped disk file.
-//! A texel is used when a triangle overlaps it (conservative rasterization), so texels shared by
-//! several triangles count once and padding no triangle reaches is never counted.
+//! A texel is used when a GPU sampling any point of a triangle reads it from the base level:
+//! with nearest filtering the texel containing the point, with linear filtering the 2x2 texels
+//! around it. Texels shared by several triangles count once, and padding no sample reaches is
+//! never counted.
 use crate::import::Res;
 use memmap2::MmapMut;
 use std::{fs::OpenOptions, path::Path};
@@ -9,6 +11,35 @@ const LIMIT: f64 = (1u64 << 52) as f64;
 /// A triangle repeating the texture more often than this vertically is left out: its rows would
 /// be swept one by one. Horizontal repeats are cheap, since a row wider than two periods is full.
 const MAX_REPEATS: i64 = 64;
+/// How the GPU reads the base level around a sample point.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Filter {
+    /// The texel containing the point.
+    Nearest,
+    /// The 2x2 texels around it: every texel whose center is less than one texel away on each
+    /// axis, since bilinear weights only vanish one full texel from a center.
+    Linear,
+}
+impl Filter {
+    /// From glTF `magFilter`/`minFilter`. The base level is read without blending only when
+    /// both are nearest; engines default unset filters to linear.
+    pub fn from_gl(mag: Option<u64>, min: Option<u64>) -> Self {
+        // NEAREST, NEAREST_MIPMAP_NEAREST and NEAREST_MIPMAP_LINEAR sample each level nearest.
+        if mag == Some(9728) && matches!(min, Some(9728 | 9984 | 9986)) {
+            Self::Nearest
+        } else {
+            Self::Linear
+        }
+    }
+    /// Extra texels read beyond the containing one, on the far side of each axis once the
+    /// coordinates are shifted by half a texel.
+    fn reach(self) -> i64 {
+        match self {
+            Self::Nearest => 0,
+            Self::Linear => 1,
+        }
+    }
+}
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Wrap {
     Repeat,
@@ -60,8 +91,8 @@ impl Wrap {
         }
     }
 }
-/// Texel columns [floor(min x), ceil(max x)) of the triangle's part with y0 <= y <= y1.
-fn span(tri: &[[f64; 2]; 3], y0: f64, y1: f64) -> Option<(i64, i64)> {
+/// Texel columns [floor(min x), ceil(max x) + reach) of the triangle's part with y0 <= y <= y1.
+fn span(tri: &[[f64; 2]; 3], y0: f64, y1: f64, reach: i64) -> Option<(i64, i64)> {
     let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
     for i in 0..3 {
         let (mut p, mut q) = (tri[i], tri[(i + 1) % 3]);
@@ -84,7 +115,7 @@ fn span(tri: &[[f64; 2]; 3], y0: f64, y1: f64) -> Option<(i64, i64)> {
         return None;
     }
     let a = lo.floor() as i64;
-    Some((a, (hi.ceil() as i64).max(a + 1)))
+    Some((a, (hi.ceil() as i64 + reach).max(a + 1)))
 }
 pub struct Coverage {
     map: MmapMut,
@@ -111,36 +142,45 @@ impl Coverage {
             stride,
         })
     }
-    /// Mark the texels a UV triangle overlaps. Returns false when the triangle was left out
-    /// because it repeats the texture more than `MAX_REPEATS` times vertically.
-    pub fn triangle(&mut self, uv: [[f64; 2]; 3], wrap: [Wrap; 2]) -> Res<bool> {
+    /// Mark the texels sampling a UV triangle reads. Returns false when the triangle was left
+    /// out because it repeats the texture more than `MAX_REPEATS` times vertically.
+    ///
+    /// Texel `i` is read by linear filtering at `x` when `i - 0.5 < x < i + 1.5`. Shifting
+    /// coordinates by half a texel turns that into `i - 1 < x' < i + 1`: the texels a nearest
+    /// lookup of `x'` would touch, extended by one on the far side. That is the `reach`.
+    pub fn triangle(&mut self, uv: [[f64; 2]; 3], wrap: [Wrap; 2], filter: Filter) -> Res<bool> {
         let (w, h) = (self.width, self.height);
-        let tri = uv.map(|[u, v]| [u * w as f64, v * h as f64]);
+        let reach = filter.reach();
+        let shift = reach as f64 / 2.;
+        let tri = uv.map(|[u, v]| [u * w as f64 - shift, v * h as f64 - shift]);
         if tri.iter().flatten().any(|c| c.is_nan() || c.abs() >= LIMIT) {
             return Err("Texture coordinate is not finite or out of range".into());
         }
         let ymin = tri.iter().map(|p| p[1]).fold(f64::INFINITY, f64::min);
         let ymax = tri.iter().map(|p| p[1]).fold(f64::NEG_INFINITY, f64::max);
         let r0 = ymin.floor() as i64;
-        let r1 = (ymax.ceil() as i64 - 1).max(r0);
+        let r1 = (ymax.ceil() as i64 - 1 + reach).max(r0);
+        // Row t reads the triangle's part with t - reach <= y <= t + 1.
+        let slab = |t: i64| (ymin.max((t - reach) as f64), ymax.min((t + 1) as f64));
         if wrap[1] == Wrap::Clamp {
             // Rows outside the texture all sample its edge rows.
             for t in r0.clamp(0, h - 1)..=r1.clamp(0, h - 1) {
-                let y0 = if t == 0 { ymin } else { ymin.max(t as f64) };
-                let y1 = if t == h - 1 {
-                    ymax
-                } else {
-                    ymax.min((t + 1) as f64)
-                };
-                self.row(t, span(&tri, y0, y1), wrap[0]);
+                let (mut y0, mut y1) = slab(t);
+                if t == 0 {
+                    y0 = ymin;
+                }
+                if t == h - 1 {
+                    y1 = ymax;
+                }
+                self.row(t, span(&tri, y0, y1, reach), wrap[0]);
             }
         } else {
             if r1 - r0 >= MAX_REPEATS * h {
                 return Ok(false);
             }
             for r in r0..=r1 {
-                let s = span(&tri, ymin.max(r as f64), ymax.min((r + 1) as f64));
-                self.row(wrap[1].index(r, h), s, wrap[0]);
+                let (y0, y1) = slab(r);
+                self.row(wrap[1].index(r, h), span(&tri, y0, y1, reach), wrap[0]);
             }
         }
         Ok(true)
@@ -192,27 +232,38 @@ mod tests {
     fn full_square_and_overlap_count_once() {
         let (_t, mut c) = coverage(10, 6);
         for _ in 0..2 {
-            c.triangle([[0., 0.], [1., 0.], [1., 1.]], REPEAT).unwrap();
-            c.triangle([[0., 0.], [1., 1.], [0., 1.]], REPEAT).unwrap();
+            c.triangle([[0., 0.], [1., 0.], [1., 1.]], REPEAT, Filter::Nearest)
+                .unwrap();
+            c.triangle([[0., 0.], [1., 1.], [0., 1.]], REPEAT, Filter::Nearest)
+                .unwrap();
         }
         assert_eq!(c.count(), 60);
     }
     #[test]
     fn texel_aligned_half_counts_diagonal_texels_once() {
         let (_t, mut c) = coverage(4, 4);
-        c.triangle([[0., 0.], [1., 0.], [1., 1.]], REPEAT).unwrap();
+        c.triangle([[0., 0.], [1., 0.], [1., 1.]], REPEAT, Filter::Nearest)
+            .unwrap();
         // 6 texels strictly below the diagonal, plus the 4 it crosses.
         assert_eq!(c.count(), 10);
     }
     #[test]
     fn tiny_triangle_uses_one_texel_and_edges_do_not_leak() {
         let (_t, mut c) = coverage(8, 8);
-        c.triangle([[0.51, 0.51], [0.52, 0.51], [0.51, 0.52]], REPEAT)
-            .unwrap();
+        c.triangle(
+            [[0.51, 0.51], [0.52, 0.51], [0.51, 0.52]],
+            REPEAT,
+            Filter::Nearest,
+        )
+        .unwrap();
         assert_eq!(c.count(), 1);
         // Exactly on texel boundaries: covers texels 2 and 3 of row 2 only.
-        c.triangle([[0.25, 0.25], [0.5, 0.25], [0.25, 0.375]], REPEAT)
-            .unwrap();
+        c.triangle(
+            [[0.25, 0.25], [0.5, 0.25], [0.25, 0.375]],
+            REPEAT,
+            Filter::Nearest,
+        )
+        .unwrap();
         assert_eq!(c.count(), 3);
     }
     #[test]
@@ -220,10 +271,12 @@ mod tests {
         // A strip one texel high, from u = -0.25 to 0.25 on an 8-texel-wide texture.
         let strip = |c: &mut Coverage, wrap: Wrap| {
             let tri = [[-0.25, 0.], [0.25, 0.], [0.25, 0.125]];
-            c.triangle(tri, [wrap, Wrap::Repeat]).unwrap();
+            c.triangle(tri, [wrap, Wrap::Repeat], Filter::Nearest)
+                .unwrap();
             c.triangle(
                 [[-0.25, 0.], [0.25, 0.125], [-0.25, 0.125]],
                 [wrap, Wrap::Repeat],
+                Filter::Nearest,
             )
             .unwrap();
         };
@@ -238,14 +291,61 @@ mod tests {
         assert_eq!(c.map[0], 0b0000_0011);
         // Clamped rows: a triangle far below the texture lands on row 0.
         let (_t, mut c) = coverage(8, 8);
-        c.triangle([[0., -3.], [0.1, -3.], [0., -2.]], [Wrap::Clamp; 2])
-            .unwrap();
+        c.triangle(
+            [[0., -3.], [0.1, -3.], [0., -2.]],
+            [Wrap::Clamp; 2],
+            Filter::Nearest,
+        )
+        .unwrap();
         assert_eq!(c.count(), 1);
         assert_eq!(c.map[0], 1);
     }
-    /// Separating-axis test of a triangle against the open texel square [c, c+1] x [r, r+1].
-    fn overlaps(tri: &[[f64; 2]; 3], c: f64, r: f64) -> bool {
-        let square = [[c, r], [c + 1., r], [c + 1., r + 1.], [c, r + 1.]];
+    #[test]
+    fn linear_filtering_reads_the_2x2_footprint() {
+        // A tiny triangle at texel coordinates ~(4.1, 4.1): bilinear sampling there blends
+        // texels 3 and 4 on each axis, whose centers 3.5 and 4.5 are within one texel.
+        let (_t, mut c) = coverage(8, 8);
+        let tri = [[0.51, 0.51], [0.52, 0.51], [0.51, 0.52]];
+        c.triangle(tri, REPEAT, Filter::Linear).unwrap();
+        assert_eq!(c.count(), 4);
+        assert_eq!((c.map[3], c.map[4]), (0b0001_1000, 0b0001_1000));
+        // Texel-aligned left half: linear reads one more column on each side, and with repeat
+        // wrapping the column left of u = 0 is the texture's last one.
+        let (_t, mut c) = coverage(8, 8);
+        c.triangle([[0., 0.], [0.5, 0.], [0.5, 1.]], REPEAT, Filter::Linear)
+            .unwrap();
+        c.triangle([[0., 0.], [0.5, 1.], [0., 1.]], REPEAT, Filter::Linear)
+            .unwrap();
+        assert!(c.map.iter().all(|row| *row == 0b1001_1111));
+        let (_t, mut c) = coverage(8, 8);
+        c.triangle(
+            [[0., 0.], [0.5, 0.], [0.5, 1.]],
+            [Wrap::Clamp; 2],
+            Filter::Linear,
+        )
+        .unwrap();
+        c.triangle(
+            [[0., 0.], [0.5, 1.], [0., 1.]],
+            [Wrap::Clamp; 2],
+            Filter::Linear,
+        )
+        .unwrap();
+        assert!(c.map.iter().all(|row| *row == 0b0001_1111));
+    }
+    #[test]
+    fn filters_follow_gltf_samplers() {
+        assert_eq!(Filter::from_gl(None, None), Filter::Linear);
+        assert_eq!(Filter::from_gl(Some(9728), None), Filter::Linear);
+        assert_eq!(Filter::from_gl(Some(9728), Some(9729)), Filter::Linear);
+        assert_eq!(Filter::from_gl(Some(9728), Some(9985)), Filter::Linear);
+        assert_eq!(Filter::from_gl(Some(9728), Some(9986)), Filter::Nearest);
+        assert_eq!(Filter::from_gl(Some(9729), Some(9728)), Filter::Linear);
+    }
+    /// Separating-axis test of a triangle against the open square [c - m, c + 1 + m] x
+    /// [r - m, r + 1 + m]: the texel itself (m = 0) or its bilinear footprint (m = 0.5).
+    fn overlaps(tri: &[[f64; 2]; 3], c: f64, r: f64, m: f64) -> bool {
+        let (c0, c1, r0, r1) = (c - m, c + 1. + m, r - m, r + 1. + m);
+        let square = [[c0, r0], [c1, r0], [c1, r1], [c0, r1]];
         let mut axes = vec![[1., 0.], [0., 1.]];
         for i in 0..3 {
             let (p, q) = (tri[i], tri[(i + 1) % 3]);
@@ -286,17 +386,21 @@ mod tests {
                 continue;
             }
             tested += 1;
-            let (_t, mut c) = coverage(w, h);
-            c.triangle(tri, [Wrap::Clamp; 2]).unwrap();
-            let texels = tri.map(|[x, y]| [x * w as f64, y * h as f64]);
-            for r in 0..h {
-                for col in 0..w {
-                    let set = c.map[r as usize * c.stride + col as usize / 8] >> (col % 8) & 1 == 1;
-                    assert_eq!(
-                        set,
-                        overlaps(&texels, col.into(), r.into()),
-                        "case {case}: texel {col},{r} of {tri:?}"
-                    );
+            // Inside [0, 1], clamping adds no texel: what it reads off the edge is the edge
+            // texel, which the footprint already includes.
+            for (filter, margin) in [(Filter::Nearest, 0.), (Filter::Linear, 0.5)] {
+                let (_t, mut c) = coverage(w, h);
+                c.triangle(tri, [Wrap::Clamp; 2], filter).unwrap();
+                let texels = tri.map(|[x, y]| [x * w as f64, y * h as f64]);
+                for r in 0..h {
+                    for col in 0..w {
+                        let bit = c.map[r as usize * c.stride + col as usize / 8] >> (col % 8);
+                        assert_eq!(
+                            bit & 1 == 1,
+                            overlaps(&texels, col.into(), r.into(), margin),
+                            "case {case}, {filter:?}: texel {col},{r} of {tri:?}"
+                        );
+                    }
                 }
             }
         }
@@ -305,15 +409,21 @@ mod tests {
     #[test]
     fn tiling_triangles() {
         let (_t, mut c) = coverage(8, 8);
-        c.triangle([[0., 0.], [100., 0.], [100., 1.]], REPEAT)
+        c.triangle([[0., 0.], [100., 0.], [100., 1.]], REPEAT, Filter::Nearest)
             .unwrap();
         assert_eq!(c.count(), 64);
         let (_t, mut c) = coverage(8, 8);
-        let skipped = !c.triangle([[0., 0.], [1., 0.], [1., 65.]], REPEAT).unwrap();
+        let skipped = !c
+            .triangle([[0., 0.], [1., 0.], [1., 65.]], REPEAT, Filter::Nearest)
+            .unwrap();
         assert!(skipped);
         assert_eq!(c.count(), 0);
         assert!(c
-            .triangle([[f64::NAN, 0.], [1., 0.], [1., 1.]], REPEAT)
+            .triangle(
+                [[f64::NAN, 0.], [1., 0.], [1., 1.]],
+                REPEAT,
+                Filter::Nearest
+            )
             .is_err());
     }
 }

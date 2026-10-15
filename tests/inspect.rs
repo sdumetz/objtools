@@ -49,12 +49,14 @@ impl Drop for Fixture {
         let _ = fs::remove_dir_all(&self.0);
     }
 }
-/// A quad textured with the left half of a 4x4 image, then the same quad again in a second object.
+/// A quad textured with texels x 2..4, y 2..6 of an 8x8 image, then the same quad again in a
+/// second object. Import's sampler leaves filtering to the engine default, linear, which also
+/// reads the texels within half a texel of that region: columns 1..=4 and rows 1..=6.
 fn half_textured(image: &str) -> Fixture {
     let f = Fixture::new();
-    image::RgbImage::new(4, 4).save(f.0.join(image)).unwrap();
+    image::RgbImage::new(8, 8).save(f.0.join(image)).unwrap();
     f.file("in.mtl", &format!("newmtl paint\nmap_Kd {image}\n"));
-    f.file("in.obj", "mtllib in.mtl\nv 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nvt 0 0\nvt .5 0\nvt .5 1\nvt 0 1\nusemtl paint\no first\nf 1/1 2/2 3/3 4/4\no second\nf 1/1 2/2 3/3 4/4\n");
+    f.file("in.obj", "mtllib in.mtl\nv 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nvt .25 .25\nvt .5 .25\nvt .5 .75\nvt .25 .75\nusemtl paint\no first\nf 1/1 2/2 3/3 4/4\no second\nf 1/1 2/2 3/3 4/4\n");
     f
 }
 #[test]
@@ -63,7 +65,7 @@ fn reports_counts_and_counts_overlapping_texels_once() {
     let report = f.inspect("in.obj");
     assert_eq!(
         report,
-        "Vertices:           8\nFaces:              4\nDiffuse texels:     16 in 1 texture\nTexture occupancy:  0.500\n\nTexture            Size  Occupancy\nsource.png          4x4  0.500\n"
+        "Vertices:           8\nFaces:              4\nDiffuse texels:     64 in 1 texture\nTexture occupancy:  0.375\n\nTexture            Size  Occupancy\nsource.png          8x8  0.375\n"
     );
     // The import workspace and coverage maps are gone; nothing was published.
     assert_eq!(f.entries(), ["in.mtl", "in.obj", "source.png"]);
@@ -84,7 +86,7 @@ fn textures_gltf_cannot_carry_are_measured_without_conversion() {
     let f = half_textured("source.bmp");
     assert!(f
         .inspect("in.obj")
-        .contains("source.bmp          4x4  0.500\n"));
+        .contains("source.bmp          8x8  0.375\n"));
     assert_eq!(f.entries(), ["in.mtl", "in.obj", "source.bmp"]);
 }
 #[test]
