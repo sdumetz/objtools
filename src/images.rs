@@ -1,10 +1,11 @@
 //! Source image policy and optional decoding/encoding, one image at a time.
 use crate::{import::Res, material::Material};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::{self, File},
-    io::{BufWriter, Read, Seek, SeekFrom},
+    io::{BufReader, BufWriter, Read},
     path::{Component, Path, PathBuf},
+    thread::{self, JoinHandle},
 };
 #[derive(Clone, Copy, Default)]
 pub enum Mode {
@@ -75,7 +76,8 @@ pub struct Plan {
     pub content: PathBuf,
     pub publish_name: Option<String>,
     pub uri: String,
-    pub alpha: bool,
+    /// Whether the content is a published glTF image whose transparency must be scanned.
+    scan: bool,
 }
 fn parent(path: &Path) -> &Path {
     path.parent()
@@ -127,7 +129,7 @@ pub fn prepare(
                 content: source.clone(),
                 publish_name: None,
                 uri: relative_uri(&source, &destination)?,
-                alpha: false,
+                scan: false,
             };
             plans.insert(source, plan);
             continue;
@@ -162,8 +164,7 @@ pub fn prepare(
         } else {
             source.clone()
         };
-        let alpha = texture_alpha(&content, output_ext)
-            .map_err(|e| format!("Texture {}: {e}", source.display()))?;
+        check_image(&content).map_err(|e| format!("Texture {}: {e}", source.display()))?;
         let uri = if copy {
             crate::gltf::uri(&name)
         } else {
@@ -175,7 +176,7 @@ pub fn prepare(
                 content,
                 publish_name: copy.then_some(name),
                 uri,
-                alpha,
+                scan: true,
             },
         );
     }
@@ -211,51 +212,194 @@ fn convert_image(source: &Path, destination: &Path, options: &Options) -> Res<()
     std::io::Write::flush(&mut output)?;
     Ok(())
 }
-// Inspect PNG transparency without decoding or retaining the image in memory.
-pub fn texture_alpha(path: &Path, extension: &str) -> Res<bool> {
-    let mut file = File::open(path)?;
-    if extension != "png" {
+/// The source paths of textures with any pixel below full opacity, scanned on a background
+/// thread: inflating a large PNG takes seconds, and only the material JSON needs the answer.
+pub fn scan_transparency(
+    plans: &HashMap<PathBuf, Plan>,
+) -> JoinHandle<Result<HashSet<PathBuf>, String>> {
+    let jobs: Vec<_> = plans
+        .iter()
+        .filter(|(_, plan)| plan.scan)
+        .map(|(source, plan)| (source.clone(), plan.content.clone()))
+        .collect();
+    thread::spawn(move || {
+        let mut transparent = HashSet::new();
+        for (source, content) in jobs {
+            if texture_alpha(&content).map_err(|e| format!("Texture {}: {e}", source.display()))? {
+                transparent.insert(source);
+            }
+        }
+        Ok(transparent)
+    })
+}
+/// Check the signature and, for PNG, the header chunks without reading any pixel, so a broken
+/// texture fails the import before the geometry work.
+fn check_image(path: &Path) -> Res<Option<png::Reader<BufReader<File>>>> {
+    let mut file = BufReader::new(File::open(path)?);
+    let png = path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("png"));
+    if !png {
         let mut magic = [0; 2];
         file.read_exact(&mut magic)?;
         if magic != [0xff, 0xd8] {
             return Err("JPEG texture has an invalid signature".into());
         }
+        return Ok(None);
+    }
+    let mut decoder = png::Decoder::new(file);
+    // Palette and tRNS transparency become an alpha channel; 16-bit samples stay exact.
+    decoder.set_transformations(png::Transformations::EXPAND);
+    Ok(Some(decoder.read_info()?))
+}
+/// Whether any pixel is less than fully opaque. An alpha channel alone proves nothing: baking and
+/// photogrammetry tools routinely write RGBA PNGs whose alpha is 255 everywhere, and blending
+/// those would cost sorting artefacts and a transparent pass for nothing. PNG rows are scanned
+/// one at a time, so even a 16k texture costs only a row of memory.
+fn texture_alpha(path: &Path) -> Res<bool> {
+    let Some(mut reader) = check_image(path)? else {
+        return Ok(false);
+    };
+    let (color, depth) = reader.output_color_type();
+    if !matches!(color, png::ColorType::GrayscaleAlpha | png::ColorType::Rgba) {
         return Ok(false);
     }
-    let mut signature = [0; 8];
-    file.read_exact(&mut signature)?;
-    if &signature != b"\x89PNG\r\n\x1a\n" {
-        return Err("PNG texture has an invalid signature".into());
-    }
-    let length = file.metadata()?.len();
-    loop {
-        let mut header = [0; 8];
-        file.read_exact(&mut header)?;
-        let size = u32::from_be_bytes(header[..4].try_into().unwrap()) as u64;
-        if file
-            .stream_position()?
-            .checked_add(size + 4)
-            .is_none_or(|end| end > length)
+    let sample = if depth == png::BitDepth::Sixteen {
+        2
+    } else {
+        1
+    };
+    let pixel = color.samples() * sample;
+    while let Some(row) = reader.next_row()? {
+        if row
+            .data()
+            .chunks_exact(pixel)
+            .any(|p| p[pixel - sample..].iter().any(|b| *b != 0xff))
         {
-            return Err("Truncated PNG texture".into());
+            return Ok(true);
         }
-        match &header[4..] {
-            b"IHDR" => {
-                if size != 13 {
-                    return Err("Invalid PNG IHDR".into());
-                }
-                let mut ihdr = [0; 13];
-                file.read_exact(&mut ihdr)?;
-                if matches!(ihdr[9], 4 | 6) {
-                    return Ok(true);
-                }
-                file.seek(SeekFrom::Current(4))?;
-            }
-            b"tRNS" => return Ok(true),
-            b"IDAT" | b"IEND" => return Ok(false),
-            _ => {
-                file.seek(SeekFrom::Current((size + 4) as i64))?;
-            }
+    }
+    Ok(false)
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use png::{BitDepth, ColorType};
+    fn encode(
+        dir: &Path,
+        name: &str,
+        color: ColorType,
+        depth: BitDepth,
+        setup: impl FnOnce(&mut png::Encoder<'_, BufWriter<File>>),
+        data: &[u8],
+    ) -> PathBuf {
+        let path = dir.join(name);
+        let mut encoder = png::Encoder::new(BufWriter::new(File::create(&path).unwrap()), 2, 1);
+        encoder.set_color(color);
+        encoder.set_depth(depth);
+        setup(&mut encoder);
+        let mut writer = encoder.write_header().unwrap();
+        writer.write_image_data(data).unwrap();
+        writer.finish().unwrap();
+        path
+    }
+    #[test]
+    fn alpha_means_a_pixel_below_full_opacity() {
+        let dir = std::env::temp_dir().join(format!("objtools-alpha-{}", std::process::id()));
+        fs::create_dir(&dir).unwrap();
+        let (eight, sixteen) = (BitDepth::Eight, BitDepth::Sixteen);
+        let none = |_: &mut png::Encoder<'_, BufWriter<File>>| {};
+        let cases = [
+            ("rgb", ColorType::Rgb, eight, vec![1, 2, 3, 4, 5, 6], false),
+            (
+                "rgba-opaque",
+                ColorType::Rgba,
+                eight,
+                vec![1, 2, 3, 255, 4, 5, 6, 255],
+                false,
+            ),
+            (
+                "rgba-254",
+                ColorType::Rgba,
+                eight,
+                vec![1, 2, 3, 255, 4, 5, 6, 254],
+                true,
+            ),
+            (
+                "ga-zero",
+                ColorType::GrayscaleAlpha,
+                eight,
+                vec![255, 255, 0, 0],
+                true,
+            ),
+            (
+                "rgba16-opaque",
+                ColorType::Rgba,
+                sixteen,
+                [255; 16].to_vec(),
+                false,
+            ),
+        ];
+        for (name, color, depth, data, expected) in cases {
+            let path = encode(&dir, &format!("{name}.png"), color, depth, none, &data);
+            assert_eq!(texture_alpha(&path).unwrap(), expected, "{name}");
         }
+        // The low byte of a 16-bit alpha counts too.
+        let mut data = [255; 16];
+        data[15] = 254;
+        let path = encode(
+            &dir,
+            "rgba16-low.png",
+            ColorType::Rgba,
+            sixteen,
+            none,
+            &data,
+        );
+        assert!(texture_alpha(&path).unwrap());
+        // tRNS: only entries that pixels actually use matter.
+        let palette = |e: &mut png::Encoder<'_, BufWriter<File>>| {
+            e.set_palette(vec![0, 0, 0, 255, 255, 255]);
+            e.set_trns(vec![255, 0]);
+        };
+        let path = encode(
+            &dir,
+            "indexed-opaque.png",
+            ColorType::Indexed,
+            eight,
+            palette,
+            &[0, 0],
+        );
+        assert!(!texture_alpha(&path).unwrap());
+        let path = encode(
+            &dir,
+            "indexed-clear.png",
+            ColorType::Indexed,
+            eight,
+            palette,
+            &[0, 1],
+        );
+        assert!(texture_alpha(&path).unwrap());
+        let key = |e: &mut png::Encoder<'_, BufWriter<File>>| e.set_trns(vec![0, 7]);
+        let path = encode(
+            &dir,
+            "gray-key.png",
+            ColorType::Grayscale,
+            eight,
+            key,
+            &[3, 7],
+        );
+        assert!(texture_alpha(&path).unwrap());
+        let path = encode(
+            &dir,
+            "gray-unkeyed.png",
+            ColorType::Grayscale,
+            eight,
+            key,
+            &[3, 8],
+        );
+        assert!(!texture_alpha(&path).unwrap());
+        fs::write(dir.join("photo.jpg"), [0xff, 0xd8, 0xff]).unwrap();
+        assert!(!texture_alpha(&dir.join("photo.jpg")).unwrap());
+        fs::remove_dir_all(dir).unwrap();
     }
 }

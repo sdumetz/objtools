@@ -207,6 +207,7 @@ fn write_with_limit(
         dir,
         &scene.materials,
     )?;
+    let transparency = crate::images::scan_transparency(&image_plans);
     let origin = if center {
         scene.bbox.center().ok_or("No vertices to center")?
     } else {
@@ -444,18 +445,21 @@ fn write_with_limit(
                 .map(|p| p["material"].as_u64().unwrap() as usize)
         })
         .collect();
+    let transparent = transparency
+        .join()
+        .map_err(|_| "Texture transparency scan panicked")??;
     let mut material_ids = HashMap::new();
     for (old_id, m) in scene.materials.iter().enumerate() {
         if !used_materials.contains(&old_id) {
             continue;
         }
         material_ids.insert(old_id, materials.len());
-        let mut has_alpha = false;
+        let mut blend = false;
         let texture = if let Some(path) = &m.texture {
             let path =
                 fs::canonicalize(path).map_err(|e| format!("Texture {}: {e}", path.display()))?;
             let plan = &image_plans[&path];
-            has_alpha = plan.alpha;
+            blend = transparent.contains(&path);
             if let Some(id) = texture_ids.get(&path) {
                 Some(*id)
             } else {
@@ -473,7 +477,7 @@ fn write_with_limit(
             None
         };
         let mut value = m.json(texture);
-        if has_alpha {
+        if blend {
             value["alphaMode"] = json!("BLEND");
         }
         for name in value["extensions"].as_object().unwrap().keys() {

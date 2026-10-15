@@ -336,12 +336,13 @@ fn unsupported_vrml_transform_is_an_error() {
 #[test]
 fn z_up_rotation_and_texture_publication() {
     let f = Fixture::new();
-    // Minimal valid PNG with an alpha channel; exporter only needs headers.
-    let png = [
-        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6,
-        0, 0, 0, 0, 0, 0, 0,
-    ];
-    fs::write(f.0.join("albedo.png"), png).unwrap();
+    // One translucent texel is enough to need blending.
+    image::RgbaImage::from_fn(2, 2, |x, y| {
+        image::Rgba([9, 9, 9, if x + y == 2 { 254 } else { 255 }])
+    })
+    .save(f.0.join("albedo.png"))
+    .unwrap();
+    let png = fs::read(f.0.join("albedo.png")).unwrap();
     f.file("in.mtl", "newmtl paint\nKd 1 1 1\nmap_Kd albedo.png\n");
     f.file("in.obj", "mtllib in.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 0 1\nusemtl paint\nf 1/1 2/2 3/3\n");
     let result = Command::new(env!("CARGO_BIN_EXE_objtools"))
@@ -373,16 +374,32 @@ fn z_up_rotation_and_texture_publication() {
 }
 
 #[test]
+fn opaque_alpha_channel_keeps_material_opaque() {
+    let f = Fixture::new();
+    image::RgbaImage::from_pixel(2, 2, image::Rgba([9, 9, 9, 255]))
+        .save(f.0.join("albedo.png"))
+        .unwrap();
+    f.file("in.mtl", "newmtl paint\nmap_Kd albedo.png\n");
+    f.file(
+        "in.obj",
+        "mtllib in.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nvt 0 0\nusemtl paint\nf 1/1 2/1 3/1\n",
+    );
+    let result = f.import("in.obj", false);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let (root, _) = f.result();
+    assert_eq!(root["materials"][0]["alphaMode"], "OPAQUE");
+}
+
+#[test]
 fn texture_error_cleans_previously_copied_files() {
     let f = Fixture::new();
-    fs::write(
-        f.0.join("valid.png"),
-        [
-            137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1,
-            8, 6, 0, 0, 0, 0, 0, 0, 0,
-        ],
-    )
-    .unwrap();
+    image::RgbaImage::new(1, 1)
+        .save(f.0.join("valid.png"))
+        .unwrap();
     f.file(
         "in.mtl",
         "newmtl first\nmap_Kd valid.png\nnewmtl missing\nmap_Kd absent.png\n",
@@ -703,12 +720,9 @@ fn zero_source_normals_are_smoothed_and_degenerate_triangles_skipped() {
 #[test]
 fn vertex_colors_become_linear_color_0_except_under_textures() {
     let f = Fixture::new();
-    // Header-only PNG, as in z_up_rotation_and_texture_publication.
-    let png = [
-        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6,
-        0, 0, 0, 0, 0, 0, 0,
-    ];
-    fs::write(f.0.join("albedo.png"), png).unwrap();
+    image::RgbImage::new(1, 1)
+        .save(f.0.join("albedo.png"))
+        .unwrap();
     f.file(
         "in.mtl",
         "newmtl plain\nKd 1 1 1\nnewmtl photo\nmap_Kd albedo.png\n",
