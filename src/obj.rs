@@ -116,6 +116,7 @@ pub fn spool(source: &Path, dir: &Path, progress: bool, texture_base: Option<&Pa
     let mut definitions = HashMap::new();
     let mut names = HashMap::from([("default".to_owned(), 0u32)]);
     let mut object = 0u32;
+    let mut seen_object = false;
     let mut material = 0u32;
     let mut warned = HashSet::new();
     let mut short_faces = 0u64;
@@ -228,6 +229,7 @@ pub fn spool(source: &Path, dir: &Path, progress: bool, texture_base: Option<&Pa
                     scene.counts[2] += 1;
                 }
                 "o" => {
+                    seen_object = true;
                     object = u32::try_from(scene.objects.len())?;
                     scene.objects.push(if rest.is_empty() {
                         "unnamed".into()
@@ -273,6 +275,18 @@ pub fn spool(source: &Path, dir: &Path, progress: bool, texture_base: Option<&Pa
                     record.clear();
                     encode_face(&mut record, object as usize, material as usize, &corners);
                     faces.write_all(&record)?;
+                }
+                // Many exporters write only groups. Until an `o` shows the file names its
+                // objects, each `g` starts one, named like the group: obj2gltf turns groups into
+                // meshes too, and a repeated name, as with `o`, is a new object. Groups inside
+                // objects are not represented. The spec's default group name stands in for none.
+                "g" if !seen_object => {
+                    object = u32::try_from(scene.objects.len())?;
+                    scene.objects.push(if rest.is_empty() {
+                        "default".into()
+                    } else {
+                        rest.into()
+                    });
                 }
                 "" | "s" | "g" => {}
                 _ => {

@@ -721,6 +721,59 @@ fn awkward_polygons_triangulate_instead_of_aborting() {
     );
 }
 
+fn mesh_names(root: &Value) -> Vec<&str> {
+    root["meshes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["name"].as_str().unwrap())
+        .collect()
+}
+
+#[test]
+fn groups_are_objects_until_the_first_o() {
+    let f = Fixture::new();
+    // A group-only file: an empty header group, a nameless group, and a repeated name.
+    f.file(
+        "in.obj",
+        "g header\nv 0 0 0\nv 1 0 0\nv 0 1 0\ng a\nf 1 2 3\ng b\nf 1 2 3\ng\nf 1 2 3\ng a\nf 1 2 3\n",
+    );
+    let result = f.import("in.obj", false);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let (root, _) = f.result();
+    assert_eq!(mesh_names(&root), ["a", "b", "default", "a"]);
+    let nodes: Vec<_> = root["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|n| n["name"].as_str())
+        .collect();
+    assert_eq!(nodes, ["a", "b", "default", "a"]);
+    // Once an `o` names objects, groups no longer split them.
+    let f = Fixture::new();
+    f.file(
+        "in.obj",
+        "v 0 0 0\nv 1 0 0\nv 0 1 0\ng lead\nf 1 2 3\no house\ng roof\nf 1 2 3\ng walls\nf 1 2 3\n",
+    );
+    let result = f.import("in.obj", false);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let (root, _) = f.result();
+    assert_eq!(mesh_names(&root), ["lead", "house"]);
+    let house = &root["meshes"][1]["primitives"][0];
+    assert_eq!(
+        root["accessors"][house["indices"].as_u64().unwrap() as usize]["count"],
+        6
+    );
+}
+
 #[test]
 fn faces_with_fewer_than_three_corners_are_omitted() {
     let f = Fixture::new();
