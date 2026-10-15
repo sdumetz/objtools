@@ -27,6 +27,7 @@ pub fn group(scene: &Scene, dir: &Path, progress: bool) -> Res<Vec<Group>> {
     let mut current = usize::MAX;
     let mut interleaved = false;
     let mut count = 0u64;
+    let mut untextured = 0u64;
     while let Some((object, material, corners)) = obj::read_face(&mut faces)? {
         count += 1;
         let uv = corners[0].vt != 0;
@@ -37,9 +38,7 @@ pub fn group(scene: &Scene, dir: &Path, progress: bool) -> Res<Vec<Group>> {
         {
             return Err(format!("Face {count} mixes missing and present UVs/normals").into());
         }
-        if scene.materials[material].texture.is_some() && !uv {
-            return Err(format!("Face {count}: textured material requires UV coordinates").into());
-        }
+        untextured += u64::from(scene.materials[material].texture.is_some() && !uv);
         let id = *keys.entry((object, material, uv)).or_insert_with(|| {
             groups.push(Group {
                 corners: 0,
@@ -53,6 +52,9 @@ pub fn group(scene: &Scene, dir: &Path, progress: bool) -> Res<Vec<Group>> {
         }
         groups[id].corners += corners.len() as u64;
         groups[id].bytes += 12 + 24 * corners.len() as u64;
+    }
+    if untextured > 0 {
+        eprintln!("Warning: {untextured} faces with a textured material have no UVs; they use an untextured copy of it");
     }
     if !interleaved {
         return Ok(groups);

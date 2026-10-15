@@ -110,7 +110,7 @@ Material colors and opacity are clamped to `[0,1]`, shininess to nonnegative val
 
 VRML material defaults are preserved, including zero specular color, shininess 0.2, transparency and emissive color. VRML shininess is converted to an exponent using a scale of 128. `solid FALSE` becomes `doubleSided`.
 
-Unsupported MTL maps/properties warn explicitly. `map_Kd` options, missing textures, image formats that cannot be decoded (or require disabled conversion), and textured faces without UVs are errors. Separate opacity/specular/bump maps are not baked into PBR textures. Both OBJ and VRML UVs have V flipped for glTF's texture convention.
+Unsupported MTL maps/properties warn explicitly. `map_Kd` options, missing textures and image formats that cannot be decoded (or require disabled conversion) are errors. Faces without UVs cannot sample a texture, and glTF forbids their primitive from referencing one, so they use a copy of their material without the texture, named `<material>-untextured`, as obj2gltf does; a warning counts them. Separate opacity/specular/bump maps are not baked into PBR textures. Both OBJ and VRML UVs have V flipped for glTF's texture convention.
 
 Policy references: [KHR_materials_specular](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_materials_specular), [VRML lighting model](https://www.web3d.org/documents/specifications/14772/V2.0/part1/concepts.html).
 

@@ -432,28 +432,29 @@ fn write_with_limit(
     let mut texture_ids = HashMap::new();
     let mut materials = Vec::new();
     let mut extensions = BTreeSet::new();
-    let used_materials: BTreeSet<usize> = document
+    // A primitive without UVs cannot sample its material's texture, and glTF forbids it from
+    // referencing one. It gets a copy of the material without the texture, as in obj2gltf
+    // (`splitIncompatibleMaterials`), so its colour factors still apply.
+    let variant = |p: &Value| {
+        let material = p["material"].as_u64().unwrap() as usize;
+        let textured = scene.materials[material].texture.is_some()
+            && p["attributes"].get("TEXCOORD_0").is_some();
+        (material, textured)
+    };
+    let used_materials: BTreeSet<(usize, bool)> = document
         .meshes
         .iter()
-        .flat_map(|mesh| {
-            mesh["primitives"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|p| p["material"].as_u64().unwrap() as usize)
-        })
+        .flat_map(|mesh| mesh["primitives"].as_array().unwrap().iter().map(variant))
         .collect();
     let transparent = transparency
         .join()
         .map_err(|_| "Texture transparency scan panicked")??;
     let mut material_ids = HashMap::new();
-    for (old_id, m) in scene.materials.iter().enumerate() {
-        if !used_materials.contains(&old_id) {
-            continue;
-        }
-        material_ids.insert(old_id, materials.len());
+    for &(old_id, textured) in &used_materials {
+        let m = &scene.materials[old_id];
+        material_ids.insert((old_id, textured), materials.len());
         let mut blend = false;
-        let texture = if let Some(path) = &m.texture {
+        let texture = if let Some(path) = m.texture.as_ref().filter(|_| textured) {
             let path =
                 fs::canonicalize(path).map_err(|e| format!("Texture {}: {e}", path.display()))?;
             let plan = &image_plans[&path];
@@ -475,6 +476,9 @@ fn write_with_limit(
             None
         };
         let mut value = m.json(texture);
+        if m.texture.is_some() && !textured {
+            value["name"] = json!(format!("{}-untextured", m.name));
+        }
         if blend {
             value["alphaMode"] = json!("BLEND");
         }
@@ -488,8 +492,7 @@ fn write_with_limit(
     for mut mesh in document.meshes {
         if !mesh["primitives"].as_array().unwrap().is_empty() {
             for primitive in mesh["primitives"].as_array_mut().unwrap() {
-                primitive["material"] =
-                    json!(material_ids[&(primitive["material"].as_u64().unwrap() as usize)]);
+                primitive["material"] = json!(material_ids[&variant(primitive)]);
             }
             let id = meshes.len();
             let mut node = json!({"name":mesh["name"],"mesh":id});

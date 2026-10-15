@@ -775,6 +775,42 @@ fn groups_are_objects_until_the_first_o() {
 }
 
 #[test]
+fn faces_without_uvs_get_an_untextured_copy_of_their_material() {
+    let f = textured_fixture("png");
+    f.file("in.mtl", "newmtl paint\nKd 0.5 0.25 1\nmap_Kd source.png\n");
+    f.file(
+        "in.obj",
+        "mtllib in.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nvt 0 0\nusemtl paint\nf 1/1 2/1 3/1\nf 1 2 3\nf 3 2 1\n",
+    );
+    let result = f.import("in.obj", false);
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(result.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("2 faces with a textured material have no UVs"),
+        "{stderr}"
+    );
+    let (root, _) = f.result();
+    let primitives = root["meshes"][0]["primitives"].as_array().unwrap();
+    assert_eq!(primitives.len(), 2);
+    for p in primitives {
+        let material = &root["materials"][p["material"].as_u64().unwrap() as usize];
+        let pbr = &material["pbrMetallicRoughness"];
+        assert_eq!(
+            pbr["baseColorFactor"],
+            serde_json::json!([0.5, 0.25, 1., 1.])
+        );
+        if p["attributes"].get("TEXCOORD_0").is_some() {
+            assert_eq!(material["name"], "paint");
+            assert!(pbr.get("baseColorTexture").is_some());
+        } else {
+            assert_eq!(material["name"], "paint-untextured");
+            assert!(pbr.get("baseColorTexture").is_none());
+        }
+    }
+    assert_eq!(root["materials"].as_array().unwrap().len(), 2);
+}
+
+#[test]
 fn faces_with_fewer_than_three_corners_are_omitted() {
     let f = Fixture::new();
     f.file(
