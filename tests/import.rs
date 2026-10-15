@@ -138,8 +138,26 @@ fn seams_materials_and_explicit_meshes() {
     let metal = &root["materials"][a["material"].as_u64().unwrap() as usize];
     assert_eq!(metal["pbrMetallicRoughness"]["metallicFactor"], 1.);
 }
+/// Each primitive's vertex count and index component type, in output order.
+fn primitive_shapes(root: &Value) -> Vec<(u64, u64)> {
+    root["meshes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|m| m["primitives"].as_array().unwrap())
+        .map(|p| {
+            let accessor = |id: &Value| &root["accessors"][id.as_u64().unwrap() as usize];
+            (
+                accessor(&p["attributes"]["POSITION"])["count"]
+                    .as_u64()
+                    .unwrap(),
+                accessor(&p["indices"])["componentType"].as_u64().unwrap(),
+            )
+        })
+        .collect()
+}
 #[test]
-fn repeated_triangles_force_bounded_chunks() {
+fn repeated_triangles_share_one_primitive_and_vertices() {
     let f = Fixture::new();
     let mut file = fs::File::create(f.0.join("in.obj")).unwrap();
     writeln!(file, "v 0 0 0\nv 1 0 0\nv 0 1 0\no huge").unwrap();
@@ -154,17 +172,90 @@ fn repeated_triangles_force_bounded_chunks() {
         String::from_utf8_lossy(&result.stderr)
     );
     let (root, _) = f.result();
-    let p = root["meshes"][0]["primitives"].as_array().unwrap();
-    assert_eq!(p.len(), 2);
-    let counts: Vec<_> = p
-        .iter()
-        .map(|p| {
-            root["accessors"][p["indices"].as_u64().unwrap() as usize]["count"]
-                .as_u64()
-                .unwrap()
-        })
-        .collect();
-    assert_eq!(counts, vec![65536 * 3, 3]);
+    assert_eq!(primitive_shapes(&root), [(3, 5123)]);
+    let p = &root["meshes"][0]["primitives"][0];
+    let indices = &root["accessors"][p["indices"].as_u64().unwrap() as usize];
+    assert_eq!(indices["count"], 65537 * 3);
+}
+/// A fan of `n - 1` triangles around an apex, using all `n` positions.
+fn fan(f: &Fixture, n: usize) {
+    let mut file = fs::File::create(f.0.join("in.obj")).unwrap();
+    writeln!(file, "v 0 0 1").unwrap();
+    for k in 1..n {
+        writeln!(file, "v {k} 0 0").unwrap();
+    }
+    for k in 2..n {
+        writeln!(file, "f 1 {k} {}", k + 1).unwrap();
+    }
+}
+#[test]
+fn index_width_follows_vertex_count() {
+    // 65,535 vertices still fit 16-bit indices: 65,535 itself is the reserved restart value.
+    for (n, component) in [(65535, 5123), (65536, 5125)] {
+        let f = Fixture::new();
+        fan(&f, n);
+        let result = f.import("in.obj", false);
+        assert!(result.status.success());
+        let (root, bin) = f.result();
+        assert_eq!(primitive_shapes(&root), [(n as u64, component)]);
+        assert_eq!(
+            root["buffers"][0]["byteLength"].as_u64().unwrap(),
+            bin.len() as u64
+        );
+        for view in root["bufferViews"].as_array().unwrap() {
+            assert_eq!(view["byteOffset"].as_u64().unwrap() % 4, 0);
+        }
+    }
+}
+#[test]
+fn shuffled_faces_and_interleaved_materials_keep_exact_vertex_counts() {
+    // A 40 x 40 grid of quads in a scrambled order, alternating two materials every quad.
+    let f = Fixture::new();
+    f.file("in.mtl", "newmtl a\nnewmtl b\n");
+    let mut file = fs::File::create(f.0.join("in.obj")).unwrap();
+    writeln!(file, "mtllib in.mtl").unwrap();
+    for y in 0..41 {
+        for x in 0..41 {
+            writeln!(file, "v {x} {y} 0").unwrap();
+        }
+    }
+    let at = |x: usize, y: usize| y * 41 + x + 1;
+    let mut corners = [
+        std::collections::BTreeSet::new(),
+        std::collections::BTreeSet::new(),
+    ];
+    for i in 0..1600 {
+        let q = (i * 997) % 1600;
+        let (x, y) = (q % 40, q / 40);
+        let material = (x + y) % 2;
+        let quad = [at(x, y), at(x + 1, y), at(x + 1, y + 1), at(x, y + 1)];
+        corners[material].extend(quad);
+        writeln!(file, "usemtl {}", ["a", "b"][material]).unwrap();
+        writeln!(file, "f {} {} {} {}", quad[0], quad[1], quad[2], quad[3]).unwrap();
+    }
+    drop(file);
+    let result = f.import("in.obj", false);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let (root, _) = f.result();
+    // One primitive per material, in order of first use, each holding exactly the positions
+    // its faces use. The first face is the corner quad, which uses material a.
+    let shapes = primitive_shapes(&root);
+    assert_eq!(shapes.len(), 2);
+    let material = |i: usize| {
+        root["meshes"][0]["primitives"][i]["material"]
+            .as_u64()
+            .unwrap()
+    };
+    assert_eq!(root["materials"][material(0) as usize]["name"], "a");
+    for (i, shape) in shapes.iter().enumerate() {
+        let name = &root["materials"][material(i) as usize]["name"];
+        let set = &corners[if name == "a" { 0 } else { 1 }];
+        assert_eq!(*shape, (set.len() as u64, 5123));
+    }
 }
 #[test]
 fn vrml_material_defaults_and_georeferencing() {
@@ -382,7 +473,7 @@ fn vrml_defaults_to_smooth_normals_with_zero_crease_angle() {
 }
 
 #[test]
-fn smooth_normals_survive_chunk_boundaries() {
+fn smooth_normals_on_a_primitive_with_32_bit_indices() {
     let f = Fixture::new();
     let mut source = fs::File::create(f.0.join("in.obj")).unwrap();
     for i in 0..22000 {
@@ -399,7 +490,7 @@ fn smooth_normals_survive_chunk_boundaries() {
     for i in 0..22000 {
         writeln!(source, "f {} {} {}", i * 3 + 1, i * 3 + 2, i * 3 + 3).unwrap();
     }
-    // Revisit positions 1 and 2 after the bounded accumulator was flushed to disk.
+    // Revisit positions 1 and 2 after 66,000 other vertices.
     writeln!(source, "f 1 66001 2").unwrap();
     drop(source);
     let result = f.import("in.obj", false);
@@ -409,33 +500,21 @@ fn smooth_normals_survive_chunk_boundaries() {
         String::from_utf8_lossy(&result.stderr)
     );
     let (root, bin) = f.result();
-    let primitives = root["meshes"][0]["primitives"].as_array().unwrap();
-    assert_eq!(primitives.len(), 2);
+    assert_eq!(primitive_shapes(&root), [(66001, 5125)]);
+    let primitive = &root["meshes"][0]["primitives"][0];
+    let attribute = |name: &str| primitive["attributes"][name].as_u64().unwrap() as usize;
+    let positions = floats(&root, &bin, attribute("POSITION"), 3);
+    let normals = floats(&root, &bin, attribute("NORMAL"), 3);
     let mut occurrences = 0;
-    for primitive in primitives {
-        let positions = floats(
-            &root,
-            &bin,
-            primitive["attributes"]["POSITION"].as_u64().unwrap() as usize,
-            3,
-        );
-        let normals = floats(
-            &root,
-            &bin,
-            primitive["attributes"]["NORMAL"].as_u64().unwrap() as usize,
-            3,
-        );
-        for (position, normal) in positions.iter().zip(normals) {
-            if position == &[0., 0., 0.] {
-                occurrences += 1;
-                assert!((normal[1] - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-6);
-                assert!((normal[2] - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-6);
-            }
+    for (position, normal) in positions.iter().zip(normals) {
+        if position == &[0., 0., 0.] {
+            occurrences += 1;
+            assert!((normal[1] - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-6);
+            assert!((normal[2] - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-6);
         }
     }
-    assert_eq!(occurrences, 2);
+    assert_eq!(occurrences, 1);
 }
-
 fn textured_fixture(extension: &str) -> Fixture {
     let f = Fixture::new();
     let image = image::RgbImage::from_fn(4, 4, |x, y| {

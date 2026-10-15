@@ -118,6 +118,7 @@ pub fn spool(source: &Path, dir: &Path, progress: bool, texture_base: Option<&Pa
     let mut object = 0u32;
     let mut material = 0u32;
     let mut warned = HashSet::new();
+    let mut record = Vec::new();
     let mut reader = BufReader::with_capacity(256 * 1024, File::open(source)?);
     let mut line = String::new();
     let mut line_no = 0;
@@ -265,14 +266,9 @@ pub fn spool(source: &Path, dir: &Path, progress: bool, texture_base: Option<&Pa
                         return Err("Face has fewer than three corners".into());
                     }
                     scene.missing_normals |= corners.iter().any(|c| c.vn == 0);
-                    faces.write_all(&object.to_le_bytes())?;
-                    faces.write_all(&material.to_le_bytes())?;
-                    faces.write_all(&(corners.len() as u32).to_le_bytes())?;
-                    for c in corners {
-                        for n in [c.v, c.vt, c.vn] {
-                            faces.write_all(&n.to_le_bytes())?;
-                        }
-                    }
+                    record.clear();
+                    encode_face(&mut record, object as usize, material as usize, &corners);
+                    faces.write_all(&record)?;
                 }
                 "" | "s" | "g" => {}
                 _ => {
@@ -301,6 +297,17 @@ pub fn spool(source: &Path, dir: &Path, progress: bool, texture_base: Option<&Pa
         }
     }
     Ok(scene)
+}
+/// Append one face spool record: object, material and corner count, then `(v, vt, vn)` per corner.
+pub fn encode_face(out: &mut Vec<u8>, object: usize, material: usize, corners: &[Corner]) {
+    for n in [object, material, corners.len()] {
+        out.extend_from_slice(&(n as u32).to_le_bytes());
+    }
+    for c in corners {
+        for n in [c.v, c.vt, c.vn] {
+            out.extend_from_slice(&n.to_le_bytes());
+        }
+    }
 }
 pub fn read_face(reader: &mut impl Read) -> Res<Option<(usize, usize, Vec<Corner>)>> {
     let mut first = [0; 4];

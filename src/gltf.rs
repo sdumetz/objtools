@@ -1,5 +1,6 @@
 //! Bounded primitive assembly, independent of whole-object vertex/face counts.
 use crate::{
+    dedup::Dedup,
     fixed::{format_triple, SCALE},
     import::Res,
     obj::{self, Scene},
@@ -9,44 +10,43 @@ use serde_json::{json, Value};
 use std::{
     collections::{BTreeSet, HashMap},
     fs::{self, File, OpenOptions},
-    io::{BufReader, BufWriter, Write},
+    io::{BufReader, BufWriter, Read, Write},
     path::{Path, PathBuf},
 };
-const MAX_VERTICES: usize = 65536;
-const MAX_TRIANGLES: usize = 65536;
-#[derive(Clone, Copy, Hash, PartialEq, Eq)]
-struct Key {
-    corner: obj::Corner,
-    normal: [u32; 3],
+/// glTF reserves each index type's maximum value for primitive restart: a primitive with
+/// `UNSIGNED_SHORT` indices holds at most 65,535 vertices, one with `UNSIGNED_INT` 2^32 - 1.
+const SHORT_VERTICES: u64 = u16::MAX as u64;
+const MAX_VERTICES: u64 = u32::MAX as u64;
+/// Floats per vertex up to the end of the UV, and where the colour starts (11 when absent).
+fn layout(uv: bool, color: bool) -> (usize, usize, u64) {
+    let uv_end = if uv { 8 } else { 6 };
+    let color_start = if color { 8 } else { 11 };
+    (
+        uv_end,
+        color_start,
+        ((uv_end + 11 - color_start) * 4) as u64,
+    )
 }
-struct Chunk {
+/// The open primitive. Its vertices stream into the payload as they are first referenced, its
+/// triangles into the index spool as u32, narrowed to u16 on close when the vertex count allows.
+struct Primitive {
     object: usize,
     material: usize,
     uv: bool,
     color: bool,
-    map: HashMap<Key, u32>,
-    // Position, normal, UV, colour; the last two are only written when the chunk has them.
-    vertices: Vec<[f32; 11]>,
-    indices: Vec<u32>,
-}
-impl Chunk {
-    fn new(object: usize, material: usize, uv: bool, color: bool) -> Self {
-        Self {
-            object,
-            material,
-            uv,
-            color,
-            map: HashMap::new(),
-            vertices: Vec::new(),
-            indices: Vec::new(),
-        }
-    }
+    start: u64,
+    vertices: u64,
+    triangles: u64,
+    min: [f32; 3],
+    max: [f32; 3],
+    indices: BufWriter<File>,
 }
 struct Document {
     accessors: Vec<Value>,
     views: Vec<Value>,
     meshes: Vec<Value>,
     offset: u64,
+    index_spool: PathBuf,
 }
 impl Document {
     fn accessor(
@@ -54,7 +54,7 @@ impl Document {
         view: usize,
         offset: u64,
         component: u32,
-        count: usize,
+        count: u64,
         kind: &str,
         bounds: Option<([f32; 3], [f32; 3])>,
     ) -> usize {
@@ -67,63 +67,88 @@ impl Document {
         self.accessors.push(a);
         id
     }
-    fn flush(&mut self, chunk: &mut Chunk, out: &mut impl Write) -> Res<()> {
-        if chunk.indices.is_empty() {
+    fn open(
+        &mut self,
+        dedup: &mut Dedup,
+        (object, material, uv): (usize, usize, bool),
+        color: bool,
+    ) -> Res<Primitive> {
+        dedup.reset()?;
+        Ok(Primitive {
+            object,
+            material,
+            uv,
+            color,
+            start: self.offset,
+            vertices: 0,
+            triangles: 0,
+            min: [f32::INFINITY; 3],
+            max: [f32::NEG_INFINITY; 3],
+            indices: BufWriter::with_capacity(256 * 1024, File::create(&self.index_spool)?),
+        })
+    }
+    fn vertex(&mut self, p: &mut Primitive, v: &[f32; 11], out: &mut impl Write) -> Res<u32> {
+        let index = u32::try_from(p.vertices)?;
+        let (uv_end, color_start, stride) = layout(p.uv, p.color);
+        for n in v[..uv_end].iter().chain(&v[color_start..]) {
+            out.write_all(&n.to_le_bytes())?;
+        }
+        for ((min, max), x) in p.min.iter_mut().zip(&mut p.max).zip(v) {
+            *min = min.min(*x);
+            *max = max.max(*x);
+        }
+        p.vertices += 1;
+        self.offset += stride;
+        Ok(index)
+    }
+    fn close(&mut self, p: Primitive, out: &mut impl Write) -> Res<()> {
+        if p.triangles == 0 {
+            // Vertices are only written for triangles, so the payload holds nothing for it.
             return Ok(());
         }
-        let uv_end = if chunk.uv { 8 } else { 6 };
-        let color_start = if chunk.color { 8 } else { 11 };
-        let stride = (uv_end + 11 - color_start) * 4;
-        let start = self.offset;
-        let mut min = [f32::INFINITY; 3];
-        let mut max = [f32::NEG_INFINITY; 3];
-        for v in &chunk.vertices {
-            for i in 0..3 {
-                min[i] = min[i].min(v[i]);
-                max[i] = max[i].max(v[i]);
-            }
-            for n in v[..uv_end].iter().chain(&v[color_start..]) {
-                out.write_all(&n.to_le_bytes())?;
-            }
-        }
-        let bytes = (chunk.vertices.len() * stride) as u64;
+        let (uv_end, _, stride) = layout(p.uv, p.color);
         let view = self.views.len();
-        self.views.push(json!({"buffer":0,"byteOffset":start,"byteLength":bytes,"byteStride":stride,"target":34962}));
-        self.offset += bytes;
-        let position = self.accessor(
-            view,
-            0,
-            5126,
-            chunk.vertices.len(),
-            "VEC3",
-            Some((min, max)),
-        );
-        let normal = self.accessor(view, 12, 5126, chunk.vertices.len(), "VEC3", None);
+        self.views.push(json!({"buffer":0,"byteOffset":p.start,"byteLength":p.vertices * stride,"byteStride":stride,"target":34962}));
+        let position = self.accessor(view, 0, 5126, p.vertices, "VEC3", Some((p.min, p.max)));
+        let normal = self.accessor(view, 12, 5126, p.vertices, "VEC3", None);
         let mut attributes = json!({"POSITION":position,"NORMAL":normal});
-        if chunk.uv {
+        if p.uv {
             attributes["TEXCOORD_0"] =
-                json!(self.accessor(view, 24, 5126, chunk.vertices.len(), "VEC2", None));
+                json!(self.accessor(view, 24, 5126, p.vertices, "VEC2", None));
         }
-        if chunk.color {
+        if p.color {
             let offset = uv_end as u64 * 4;
             attributes["COLOR_0"] =
-                json!(self.accessor(view, offset, 5126, chunk.vertices.len(), "VEC3", None));
+                json!(self.accessor(view, offset, 5126, p.vertices, "VEC3", None));
         }
-        for i in &chunk.indices {
-            out.write_all(&i.to_le_bytes())?;
+        let mut spool = p.indices.into_inner().map_err(|e| e.into_error())?;
+        spool.flush()?;
+        drop(spool);
+        let mut spool = BufReader::with_capacity(256 * 1024, File::open(&self.index_spool)?);
+        let short = p.vertices <= SHORT_VERTICES;
+        let count = p.triangles * 3;
+        let mut index = [0; 4];
+        for _ in 0..count {
+            spool.read_exact(&mut index)?;
+            out.write_all(if short { &index[..2] } else { &index })?;
         }
+        let bytes = count * if short { 2 } else { 4 };
         let index_view = self.views.len();
-        let index_bytes = (chunk.indices.len() * 4) as u64;
-        self.views.push(
-            json!({"buffer":0,"byteOffset":self.offset,"byteLength":index_bytes,"target":34963}),
-        );
-        self.offset += index_bytes;
-        let indices = self.accessor(index_view, 0, 5125, chunk.indices.len(), "SCALAR", None);
-        self.meshes[chunk.object]["primitives"].as_array_mut().unwrap().push(json!({"attributes":attributes,"indices":indices,"material":chunk.material,"mode":4}));
-        // Every range is owned by exactly one primitive/mesh; future splitting can copy it.
-        chunk.map.clear();
-        chunk.vertices.clear();
-        chunk.indices.clear();
+        self.views
+            .push(json!({"buffer":0,"byteOffset":self.offset,"byteLength":bytes,"target":34963}));
+        self.offset += bytes;
+        // Keep the next vertex view 4-byte aligned after 16-bit indices.
+        let padding = self.offset.next_multiple_of(4) - self.offset;
+        out.write_all(&[0; 4][..padding as usize])?;
+        self.offset += padding;
+        let component = if short { 5123 } else { 5125 };
+        let indices = self.accessor(index_view, 0, component, count, "SCALAR", None);
+        self.meshes[p.object]["primitives"]
+            .as_array_mut()
+            .unwrap()
+            .push(
+                json!({"attributes":attributes,"indices":indices,"material":p.material,"mode":4}),
+            );
         Ok(())
     }
 }
@@ -160,6 +185,17 @@ fn create(path: &Path, outputs: &mut Outputs) -> Res<File> {
 }
 
 pub fn write(scene: Scene, dir: &Path, options: &crate::import::Options) -> Res<()> {
+    write_with_limit(scene, dir, options, MAX_VERTICES)
+}
+/// `max_vertices` is only lowered by tests, to exercise splitting at the u32 index limit.
+fn write_with_limit(
+    scene: Scene,
+    dir: &Path,
+    options: &crate::import::Options,
+    max_vertices: u64,
+) -> Res<()> {
+    // Validates faces before any image conversion or geometry work.
+    let (groups, regrouped) = crate::group::group(&scene, dir, options.progress)?;
     let output = &options.output;
     let center = options.center;
     let z_up = options.z_up;
@@ -197,6 +233,8 @@ pub fn write(scene: Scene, dir: &Path, options: &crate::import::Options) -> Res<
     } else {
         None
     };
+    let max_corners = groups.iter().map(|g| g.corners).max().unwrap_or(0);
+    let mut dedup = Dedup::create(dir, scene.counts[0], max_corners)?;
     let mut faces = BufReader::with_capacity(256 * 1024, File::open(dir.join("faces"))?);
     let mut document = Document {
         accessors: Vec::new(),
@@ -207,37 +245,36 @@ pub fn write(scene: Scene, dir: &Path, options: &crate::import::Options) -> Res<
             .map(|n| json!({"name":n,"primitives":[]}))
             .collect(),
         offset: 0,
+        index_spool: dir.join("indices"),
     };
     // Build payload in the private workspace before touching output paths.
     let bin_spool = dir.join("payload.bin");
     let mut binary = BufWriter::with_capacity(256 * 1024, File::create(&bin_spool)?);
-    let mut chunk = Chunk::new(0, 0, false, false);
+    let mut open: Option<Primitive> = None;
     let mut face_count = 0u64;
     let mut textured_colors = 0u64;
     let mut skipped_degenerate = 0u64;
     let mut repaired_normals = 0u64;
+    let mut splits = 0u64;
+    let mut local = Vec::new();
     while let Some((object, material, corners)) = obj::read_face(&mut faces)? {
         face_count += 1;
+        // Faces were validated by grouping: UV and normal presence is uniform per face.
         let uv = corners[0].vt != 0;
-        if scene.materials[material].texture.is_some() && !uv {
-            return Err(
-                format!("Face {face_count}: textured material requires UV coordinates").into(),
-            );
-        }
         let normal = corners[0].vn != 0;
-        if corners
-            .iter()
-            .any(|c| (c.vt != 0) != uv || (c.vn != 0) != normal)
-        {
-            return Err(format!("Face {face_count} mixes missing and present UVs/normals").into());
-        }
         // glTF multiplies COLOR_0 into the base colour, which would tint a texture twice.
         let textured = scene.materials[material].texture.is_some();
         let color = colors.as_ref().filter(|_| !textured);
         textured_colors += u64::from(colors.is_some() && textured);
-        if chunk.object != object || chunk.material != material || chunk.uv != uv {
-            document.flush(&mut chunk, &mut binary)?;
-            chunk = Chunk::new(object, material, uv, color.is_some());
+        let key = (object, material, uv);
+        if open
+            .as_ref()
+            .is_none_or(|p| (p.object, p.material, p.uv) != key)
+        {
+            if let Some(p) = open.take() {
+                document.close(p, &mut binary)?;
+            }
+            open = Some(document.open(&mut dedup, key, color.is_some())?);
         }
         let mut positions = Vec::with_capacity(corners.len());
         let mut vertices = Vec::with_capacity(corners.len());
@@ -292,49 +329,64 @@ pub fn write(scene: Scene, dir: &Path, options: &crate::import::Options) -> Res<
             skipped_degenerate += 1;
             continue;
         }
-        let (triangles, flat) =
-            triangulate::triangulate(&positions).map_err(|e| format!("Face {face_count}: {e}"))?;
-        {
-            for (corner, v) in corners.iter().zip(&mut vertices) {
-                if v[3..6].iter().any(|n| *n != 0.) {
-                    continue;
-                }
-                let sum = obj::fetch::<3>(smooth.as_ref().unwrap(), corner.v, scene.counts[0])?
-                    .map(f64::from_le_bytes);
-                let length = sum.iter().map(|x| x * x).sum::<f64>().sqrt();
-                let normal = if length > 0. && length.is_finite() {
-                    sum.map(|x| (x / length) as f32)
-                } else {
-                    flat
-                };
-                v[3..6].copy_from_slice(&normal);
+        let (triangles, flat) = triangulate::triangulate(&positions).map_err(|e| {
+            if regrouped {
+                let names = (&scene.objects[object], &scene.materials[material].name);
+                format!("Face of object {} with material {}: {e}", names.0, names.1)
+            } else {
+                format!("Face {face_count}: {e}")
             }
+        })?;
+        // A corner falling back to its face's flat normal has a normal of its own: never shared.
+        let mut own = vec![false; corners.len()];
+        for ((corner, v), own) in corners.iter().zip(&mut vertices).zip(&mut own) {
+            if v[3..6].iter().any(|n| *n != 0.) {
+                continue;
+            }
+            let sum = obj::fetch::<3>(smooth.as_ref().unwrap(), corner.v, scene.counts[0])?
+                .map(f64::from_le_bytes);
+            let length = sum.iter().map(|x| x * x).sum::<f64>().sqrt();
+            let normal = if length > 0. && length.is_finite() {
+                sum.map(|x| (x / length) as f32)
+            } else {
+                *own = true;
+                flat
+            };
+            v[3..6].copy_from_slice(&normal);
         }
+        let mut p = open.take().unwrap();
+        // The only split: where u32 indices run out. A face adds at most its corner count.
+        if p.vertices + corners.len() as u64 > max_vertices {
+            splits += 1;
+            document.close(p, &mut binary)?;
+            p = document.open(&mut dedup, key, color.is_some())?;
+        }
+        local.clear();
+        local.resize(corners.len(), None);
         for triangle in triangles {
-            if chunk.vertices.len() + 3 > MAX_VERTICES || chunk.indices.len() / 3 >= MAX_TRIANGLES {
-                document.flush(&mut chunk, &mut binary)?;
-            }
             for i in triangle {
-                let v = vertices[i];
-                let key = Key {
-                    corner: corners[i],
-                    normal: if normal {
-                        [0; 3]
-                    } else {
-                        [v[3].to_bits(), v[4].to_bits(), v[5].to_bits()]
-                    },
+                let index = match local[i] {
+                    Some(index) => index,
+                    None => {
+                        let next = u32::try_from(p.vertices)?;
+                        let found = if own[i] {
+                            None
+                        } else {
+                            dedup.find_or_insert(corners[i], next)?
+                        };
+                        let index = match found {
+                            Some(index) => index,
+                            None => document.vertex(&mut p, &vertices[i], &mut binary)?,
+                        };
+                        local[i] = Some(index);
+                        index
+                    }
                 };
-                let index = if let Some(index) = chunk.map.get(&key) {
-                    *index
-                } else {
-                    let index = chunk.vertices.len() as u32;
-                    chunk.vertices.push(v);
-                    chunk.map.insert(key, index);
-                    index
-                };
-                chunk.indices.push(index);
+                p.indices.write_all(&index.to_le_bytes())?;
             }
+            p.triangles += 1;
         }
+        open = Some(p);
         if progress && face_count.is_multiple_of(1_000_000) {
             eprintln!(
                 "Converted {face_count} faces, {} binary bytes",
@@ -342,7 +394,12 @@ pub fn write(scene: Scene, dir: &Path, options: &crate::import::Options) -> Res<
             );
         }
     }
-    document.flush(&mut chunk, &mut binary)?;
+    if let Some(p) = open.take() {
+        document.close(p, &mut binary)?;
+    }
+    if splits > 0 {
+        eprintln!("Warning: {splits} primitives reached the {max_vertices}-vertex limit of 32-bit indices and were split");
+    }
     if repaired_normals > 0 {
         eprintln!("Warning: generated smooth normals for {repaired_normals} corners with zero-length source normals");
     }
@@ -467,4 +524,51 @@ pub fn write(scene: Scene, dir: &Path, options: &crate::import::Options) -> Res<
         document.offset
     );
     Ok(())
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    /// Primitive vertex counts after importing `obj` with a lowered vertex limit.
+    fn import_with_limit(obj: &str, limit: u64) -> Vec<u64> {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "objtools-split-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        fs::create_dir(&dir).unwrap();
+        let input = dir.join("in.obj");
+        fs::write(&input, obj).unwrap();
+        let output = dir.join("out.gltf");
+        let options = crate::import::Options {
+            input: input.clone(),
+            output: output.clone(),
+            tmp_dir: dir.clone(),
+            center: false,
+            z_up: false,
+            progress: false,
+            keep_tmp: false,
+            images: Default::default(),
+        };
+        let scene = obj::spool(&input, &dir, false, None).unwrap();
+        write_with_limit(scene, &dir, &options, limit).unwrap();
+        let root: Value = serde_json::from_slice(&fs::read(&output).unwrap()).unwrap();
+        fs::remove_dir_all(&dir).unwrap();
+        let primitives = root["meshes"][0]["primitives"].as_array().unwrap();
+        let accessors = &root["accessors"];
+        primitives
+            .iter()
+            .map(|p| {
+                let position = p["attributes"]["POSITION"].as_u64().unwrap() as usize;
+                accessors[position]["count"].as_u64().unwrap()
+            })
+            .collect()
+    }
+    #[test]
+    fn primitives_split_only_at_the_index_limit() {
+        let obj = "v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nf 1 2 3\nf 1 3 4\n";
+        assert_eq!(import_with_limit(obj, 6), [4]);
+        // The second face could add three vertices, which would pass the limit.
+        assert_eq!(import_with_limit(obj, 5), [3, 3]);
+    }
 }

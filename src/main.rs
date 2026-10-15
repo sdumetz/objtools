@@ -1,6 +1,8 @@
+mod dedup;
 mod fixed;
 mod format;
 mod gltf;
+mod group;
 mod images;
 mod import;
 mod material;
