@@ -722,6 +722,31 @@ fn awkward_polygons_triangulate_instead_of_aborting() {
 }
 
 #[test]
+fn faces_with_fewer_than_three_corners_are_omitted() {
+    let f = Fixture::new();
+    f.file(
+        "in.obj",
+        "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2\nf 3\nf\nf 1 2 3\n",
+    );
+    let result = f.import("in.obj", false);
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(result.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("omitted 3 faces with fewer than three corners"),
+        "{stderr}"
+    );
+    let (root, _) = f.result();
+    let p = &root["meshes"][0]["primitives"][0];
+    assert_eq!(
+        root["accessors"][p["indices"].as_u64().unwrap() as usize]["count"],
+        3
+    );
+    // Their indices are still checked.
+    f.file("bad.obj", "v 0 0 0\nf 1 2\n");
+    assert!(!f.import("bad.obj", false).status.success());
+}
+
+#[test]
 fn zero_source_normals_are_smoothed_and_degenerate_triangles_skipped() {
     let f = Fixture::new();
     f.file("in.obj","v 0 0 0\nv 1 0 0\nv 0 1 0\nv 0 0 1\nvn 0 0 0\nf 1//1 2//1 3//1\nf 1//1 4//1 2//1\nf 1//1 1//1 2//1\n");

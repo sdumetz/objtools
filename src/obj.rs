@@ -118,6 +118,7 @@ pub fn spool(source: &Path, dir: &Path, progress: bool, texture_base: Option<&Pa
     let mut object = 0u32;
     let mut material = 0u32;
     let mut warned = HashSet::new();
+    let mut short_faces = 0u64;
     let mut record = Vec::new();
     let mut reader = BufReader::with_capacity(256 * 1024, File::open(source)?);
     let mut line = String::new();
@@ -262,8 +263,11 @@ pub fn spool(source: &Path, dir: &Path, progress: bool, texture_base: Option<&Pa
                         }
                         corners.push(corner(token, scene.counts)?);
                     }
+                    // Two corners make a line and one a point: omitted like `l` and `p` records,
+                    // once their indices are known to be valid.
                     if corners.len() < 3 {
-                        return Err("Face has fewer than three corners".into());
+                        short_faces += 1;
+                        return Ok(());
                     }
                     scene.missing_normals |= corners.iter().any(|c| c.vn == 0);
                     record.clear();
@@ -280,6 +284,9 @@ pub fn spool(source: &Path, dir: &Path, progress: bool, texture_base: Option<&Pa
             Ok(())
         })();
         result.map_err(|e| format!("{}:{line_no}: {e}", source.display()))?;
+    }
+    if short_faces > 0 {
+        eprintln!("Warning: omitted {short_faces} faces with fewer than three corners");
     }
     for writer in &mut attrs {
         writer.flush()?;
