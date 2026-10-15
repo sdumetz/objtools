@@ -149,7 +149,7 @@ cargo clippy --all-targets -- -D warnings
 
 Tests cover coordinate precision, scientific notation, negative indices, UV seams, material parameters, mesh ranges, VRML defaults, concave polygons, one primitive per material under shuffled and interleaved face orders, 16/32-bit index selection, output cleanup, inspect reports matching across OBJ and imported glTF, and texel coverage against a brute-force overlap test. The glTF writer uses Serde for metadata and a small binary writer, with no mesh-owning library or C/C++ dependency. CI builds and tests on Linux, macOS and Windows.
 
-Optional format validation:
+Optional format validation with Khronos's validator, for models that fit in memory (it loads the whole `.bin`):
 
 ```sh
 npm install --prefix /tmp/objtools-validator gltf-validator
@@ -160,7 +160,6 @@ For a real import with Linux process-memory monitoring:
 
 ```sh
 python3 tools/monitor_import.py input.obj destination/model.gltf --center --progress --tmp-dir destination
-NODE_PATH=/tmp/objtools-validator/node_modules node tools/validate_gltf_chunked.cjs destination/model.gltf /tmp/validation.json
 ```
 
-The monitor writes import logs, one-second RSS samples and a peak-memory report beside the model. RSS includes the mapped spools (evictable page cache); the anonymous figure is the importer's own heap. The chunked validator checks the complete JSON structure, then every primitive's binary range and referenced images using Khronos's validator, without loading the entire binary file. It holds one primitive's range in memory at a time. Since primitives are no longer size-capped, that range can be a whole object, so models whose largest primitive exceeds free RAM (or Node's buffer limit) cannot be validated this way. The metadata pass defers external-resource I/O checks to the primitive passes.
+The monitor writes import logs, one-second RSS samples and a peak-memory report beside the model. RSS includes the mapped spools (evictable page cache); the anonymous figure is the importer's own heap.
