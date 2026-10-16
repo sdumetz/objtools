@@ -123,6 +123,9 @@ pub fn spool(source: &Path, dir: &Path, progress: bool, texture_base: Option<&Pa
     let mut record = Vec::new();
     let mut reader = BufReader::with_capacity(256 * 1024, File::open(source)?);
     let mut line = String::new();
+    // A statement continued over several lines, and the line it started on.
+    let mut joined = String::new();
+    let mut start_line = 0;
     let mut line_no = 0;
     let mut bytes = 0;
     let mut next_progress = 100_000_000;
@@ -132,19 +135,49 @@ pub fn spool(source: &Path, dir: &Path, progress: bool, texture_base: Option<&Pa
         let size = Read::by_ref(&mut reader)
             .take(1024 * 1024 + 1)
             .read_line(&mut line)?;
-        if size == 0 {
+        let eof = size == 0;
+        if eof && joined.is_empty() {
             break;
         }
         if size > 1024 * 1024 {
             return Err("OBJ line exceeds 1 MiB limit".into());
         }
-        bytes += size;
-        line_no += 1;
+        if !eof {
+            bytes += size;
+            line_no += 1;
+        }
         if progress && bytes >= next_progress {
             eprintln!("Spooling OBJ: {}", crate::format::fmt_bytes(bytes as u64));
             next_progress = bytes + 100_000_000;
         }
-        let text = line.split('#').next().unwrap().trim();
+        let stripped = line.split('#').next().unwrap().trim();
+        // A trailing backslash, optionally followed by whitespace, continues the statement on the
+        // next line, as in Blender's importer (`read_next_obj_line`), which applies it to every
+        // statement; obj2gltf only does so for faces. The OBJ spec shows it in examples without
+        // stating a rule. Comments are stripped first, so a comment never continues: a remark
+        // ending in a Windows path such as `C:\models\` must not swallow the next line.
+        if let Some(head) = stripped.strip_suffix('\\').filter(|_| !eof) {
+            if joined.is_empty() {
+                start_line = line_no;
+            }
+            if joined.len() + head.len() >= 1024 * 1024 {
+                return Err(format!(
+                    "{}:{start_line}: OBJ statement exceeds 1 MiB limit",
+                    source.display()
+                )
+                .into());
+            }
+            joined.push_str(head);
+            joined.push(' ');
+            continue;
+        }
+        let continued = !joined.is_empty();
+        if continued {
+            joined.push_str(stripped);
+        } else {
+            start_line = line_no;
+        }
+        let text = if continued { joined.trim() } else { stripped };
         let (key, rest) = text.split_once(char::is_whitespace).unwrap_or((text, ""));
         let rest = rest.trim();
         let result: Res<()> = (|| {
@@ -297,7 +330,11 @@ pub fn spool(source: &Path, dir: &Path, progress: bool, texture_base: Option<&Pa
             }
             Ok(())
         })();
-        result.map_err(|e| format!("{}:{line_no}: {e}", source.display()))?;
+        result.map_err(|e| format!("{}:{start_line}: {e}", source.display()))?;
+        joined.clear();
+        if eof {
+            break;
+        }
     }
     if short_faces > 0 {
         eprintln!("Warning: omitted {short_faces} faces with fewer than three corners");

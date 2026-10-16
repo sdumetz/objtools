@@ -811,6 +811,40 @@ fn faces_without_uvs_get_an_untextured_copy_of_their_material() {
 }
 
 #[test]
+fn trailing_backslash_continues_statements_but_not_comments() {
+    let f = Fixture::new();
+    // A comment ending in a backslash keeps the next vertex; a face spans three lines, with
+    // whitespace after a backslash; the last face ends the file mid-continuation.
+    f.file(
+        "in.obj",
+        "# exported to C:\\models\\\nv 0 0 0\nv 1 0 0\nv 1 1 \\\n 0\nv 0 1 0\nf 1 2 \\  \n 3 \\\n 4\nf 1 2 3 \\",
+    );
+    let result = f.import("in.obj", false);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let (root, _) = f.result();
+    let p = &root["meshes"][0]["primitives"][0];
+    assert_eq!(
+        root["accessors"][p["attributes"]["POSITION"].as_u64().unwrap() as usize]["count"],
+        4
+    );
+    assert_eq!(
+        root["accessors"][p["indices"].as_u64().unwrap() as usize]["count"],
+        9
+    );
+    // Errors name the line a continued statement starts on.
+    let f = Fixture::new();
+    f.file("bad.obj", "v 0 0 0\nf 1 \\\n 2 x\n");
+    let result = f.import("bad.obj", false);
+    assert!(!result.status.success());
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("bad.obj:2:"), "{stderr}");
+}
+
+#[test]
 fn faces_with_fewer_than_three_corners_are_omitted() {
     let f = Fixture::new();
     f.file(
