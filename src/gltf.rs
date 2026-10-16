@@ -454,6 +454,7 @@ fn write_with_limit(
         .join()
         .map_err(|_| "Texture transparency scan panicked")??;
     let mut material_ids = HashMap::new();
+    let mut invisible = BTreeSet::new();
     for &(old_id, textured) in &used_materials {
         let m = &scene.materials[old_id];
         material_ids.insert((old_id, textured), materials.len());
@@ -489,6 +490,12 @@ fn write_with_limit(
             None
         };
         let mut value = m.json(texture);
+        // Kept literal, but flagged: a fully dissolved material is almost always an exporter
+        // writing `Tr` as opacity, and silently invisible objects would leave no clue why.
+        // Glass (`illum 4`/`9`) keeps alpha 1, so `d 0` there, clear glass, is not flagged.
+        if value["pbrMetallicRoughness"]["baseColorFactor"][3] == 0. && invisible.insert(old_id) {
+            eprintln!("Warning: material {} is fully transparent (d 0 or Tr 1) and will be invisible; check whether its exporter writes Tr as opacity", m.name);
+        }
         if m.texture.is_some() && !textured {
             value["name"] = json!(format!("{}-untextured", m.name));
         }

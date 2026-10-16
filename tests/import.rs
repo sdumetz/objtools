@@ -908,6 +908,38 @@ fn map_kd_options_become_texture_transform_and_clamp() {
 }
 
 #[test]
+fn fully_transparent_materials_warn_once_unless_glass() {
+    let f = textured_fixture("png");
+    f.file(
+        "in.mtl",
+        "newmtl ghost\nTr 1\nmap_Kd source.png\nnewmtl glass\nd 0\nillum 4\nnewmtl unused\nd 0\n",
+    );
+    // `ghost` is used with and without UVs, so it is written twice, but warned once.
+    f.file(
+        "in.obj",
+        "mtllib in.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nvt 0 0\nusemtl ghost\nf 1/1 2/1 3/1\nf 1 2 3\nusemtl glass\nf 1 2 3\n",
+    );
+    let result = f.import("in.obj", false);
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(result.status.success(), "{stderr}");
+    assert_eq!(
+        stderr.matches("is fully transparent").count(),
+        1,
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("material ghost is fully transparent"),
+        "{stderr}"
+    );
+    // The output stays literal.
+    let (root, _) = f.result();
+    assert_eq!(
+        root["materials"][0]["pbrMetallicRoughness"]["baseColorFactor"][3],
+        0.
+    );
+}
+
+#[test]
 fn faces_with_fewer_than_three_corners_are_omitted() {
     let f = Fixture::new();
     f.file(
