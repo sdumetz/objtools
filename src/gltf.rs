@@ -33,7 +33,8 @@ struct Primitive {
     object: usize,
     material: usize,
     uv: bool,
-    color: bool,
+    /// The colour attribute's semantic, when the primitive has one.
+    color: Option<&'static str>,
     start: u64,
     vertices: u64,
     triangles: u64,
@@ -71,7 +72,7 @@ impl Document {
         &mut self,
         dedup: &mut Dedup,
         (object, material, uv): (usize, usize, bool),
-        color: bool,
+        color: Option<&'static str>,
     ) -> Res<Primitive> {
         dedup.reset()?;
         Ok(Primitive {
@@ -89,7 +90,7 @@ impl Document {
     }
     fn vertex(&mut self, p: &mut Primitive, v: &[f32; 11], out: &mut impl Write) -> Res<u32> {
         let index = u32::try_from(p.vertices)?;
-        let (uv_end, color_start, stride) = layout(p.uv, p.color);
+        let (uv_end, color_start, stride) = layout(p.uv, p.color.is_some());
         for n in v[..uv_end].iter().chain(&v[color_start..]) {
             out.write_all(&n.to_le_bytes())?;
         }
@@ -106,7 +107,7 @@ impl Document {
             // Vertices are only written for triangles, so the payload holds nothing for it.
             return Ok(());
         }
-        let (uv_end, _, stride) = layout(p.uv, p.color);
+        let (uv_end, _, stride) = layout(p.uv, p.color.is_some());
         let view = self.views.len();
         self.views.push(json!({"buffer":0,"byteOffset":p.start,"byteLength":p.vertices * stride,"byteStride":stride,"target":34962}));
         let position = self.accessor(view, 0, 5126, p.vertices, "VEC3", Some((p.min, p.max)));
@@ -116,9 +117,9 @@ impl Document {
             attributes["TEXCOORD_0"] =
                 json!(self.accessor(view, 24, 5126, p.vertices, "VEC2", None));
         }
-        if p.color {
+        if let Some(semantic) = p.color {
             let offset = uv_end as u64 * 4;
-            attributes["COLOR_0"] =
+            attributes[semantic] =
                 json!(self.accessor(view, offset, 5126, p.vertices, "VEC3", None));
         }
         let mut spool = p.indices.into_inner().map_err(|e| e.into_error())?;
@@ -267,9 +268,13 @@ fn write_with_limit(
         // Faces were validated by grouping: UV and normal presence is uniform per face.
         let uv = corners[0].vt != 0;
         let normal = corners[0].vn != 0;
-        // glTF multiplies COLOR_0 into the base colour, which would tint a texture twice.
-        let textured = scene.materials[material].texture.is_some();
-        let color = colors.as_ref().filter(|_| !textured);
+        // glTF multiplies COLOR_0 into the base colour, which would tint a texture twice. Under
+        // a texture the colours are kept as `_COLOR` instead: glTF reserves a leading underscore
+        // for application-specific attributes, which renderers ignore, so the data survives.
+        // Faces without UVs use an untextured copy of their material, which COLOR_0 may tint.
+        let textured = scene.materials[material].texture.is_some() && uv;
+        let color = colors.as_ref();
+        let semantic = color.map(|_| if textured { "_COLOR" } else { "COLOR_0" });
         textured_colors += u64::from(colors.is_some() && textured);
         let key = (object, material, uv);
         if open
@@ -279,7 +284,7 @@ fn write_with_limit(
             if let Some(p) = open.take() {
                 document.close(p, &mut binary)?;
             }
-            open = Some(document.open(&mut dedup, key, color.is_some())?);
+            open = Some(document.open(&mut dedup, key, semantic)?);
         }
         let mut positions = Vec::with_capacity(corners.len());
         let mut vertices = Vec::with_capacity(corners.len());
@@ -358,7 +363,7 @@ fn write_with_limit(
         if p.vertices + corners.len() as u64 > max_vertices {
             splits += 1;
             document.close(p, &mut binary)?;
-            p = document.open(&mut dedup, key, color.is_some())?;
+            p = document.open(&mut dedup, key, semantic)?;
         }
         local.clear();
         local.resize(corners.len(), None);
@@ -403,7 +408,7 @@ fn write_with_limit(
         eprintln!("Warning: generated smooth normals for {repaired_normals} corners with zero-length source normals");
     }
     if textured_colors > 0 {
-        eprintln!("Warning: omitted vertex colors on {textured_colors} textured faces, where they would tint the texture");
+        eprintln!("Warning: vertex colors on {textured_colors} textured faces are kept as _COLOR, which renderers ignore, since COLOR_0 would tint the texture a second time; use --no-color to drop them");
     }
     if skipped_degenerate > 0 {
         eprintln!("Warning: skipped {skipped_degenerate} faces with zero area");
@@ -591,8 +596,9 @@ mod tests {
             keep_tmp: false,
             images: Default::default(),
             quiet: true,
+            no_color: false,
         };
-        let scene = obj::spool(&input, &dir, false, None).unwrap();
+        let scene = obj::spool(&input, &dir, false, None, true).unwrap();
         write_with_limit(scene, &dir, &options, limit).unwrap();
         let root: Value = serde_json::from_slice(&fs::read(&output).unwrap()).unwrap();
         fs::remove_dir_all(&dir).unwrap();

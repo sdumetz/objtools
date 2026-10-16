@@ -17,6 +17,8 @@ pub struct Options {
     pub images: crate::images::Options,
     /// Only warnings reach stderr; `inspect` imports into a workspace nobody will look at.
     pub quiet: bool,
+    /// Drop OBJ vertex colours instead of writing `COLOR_0`/`_COLOR`.
+    pub no_color: bool,
 }
 // Private disk-backed adapter used by the VRML reader.
 pub struct ImportOptions {
@@ -94,6 +96,7 @@ pub fn run(opts: Options) -> Res<()> {
         } else {
             Some(texture_base)
         },
+        !opts.no_color,
     )?;
     crate::gltf::write(scene, &workspace.path, &opts)
 }

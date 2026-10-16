@@ -1023,7 +1023,7 @@ fn zero_source_normals_are_smoothed_and_degenerate_triangles_skipped() {
 }
 
 #[test]
-fn vertex_colors_become_linear_color_0_except_under_textures() {
+fn vertex_colors_become_linear_color_0_or_color_under_textures() {
     let f = Fixture::new();
     image::RgbImage::new(1, 1)
         .save(f.0.join("albedo.png"))
@@ -1039,15 +1039,23 @@ fn vertex_colors_become_linear_color_0_except_under_textures() {
     assert!(result.status.success(), "{stderr}");
     assert!(stderr.contains("vertex color alpha is omitted"), "{stderr}");
     assert!(
-        stderr.contains("omitted vertex colors on 1 textured faces"),
+        stderr.contains("vertex colors on 1 textured faces are kept as _COLOR"),
         "{stderr}"
     );
     let (root, bin) = f.result();
     let primitives = root["meshes"][0]["primitives"].as_array().unwrap();
     assert_eq!(primitives.len(), 3);
-    // Position+normal+colour, then the same with UVs in between.
-    for (primitive, stride) in primitives.iter().zip([36, 44]) {
-        let accessor = primitive["attributes"]["COLOR_0"].as_u64().unwrap() as usize;
+    // Position+normal+colour, then the same with UVs in between. The textured primitive keeps
+    // the same values under the application-specific name.
+    let layouts = [(36, "COLOR_0"), (44, "COLOR_0"), (44, "_COLOR")];
+    for (primitive, (stride, semantic)) in primitives.iter().zip(layouts) {
+        let other = if semantic == "_COLOR" {
+            "COLOR_0"
+        } else {
+            "_COLOR"
+        };
+        assert!(primitive["attributes"][other].is_null());
+        let accessor = primitive["attributes"][semantic].as_u64().unwrap() as usize;
         assert_eq!(root["accessors"][accessor]["type"], "VEC3");
         let view = root["accessors"][accessor]["bufferView"].as_u64().unwrap() as usize;
         assert_eq!(root["bufferViews"][view]["byteStride"], stride);
@@ -1063,8 +1071,27 @@ fn vertex_colors_become_linear_color_0_except_under_textures() {
     }
     let uv = primitives[1]["attributes"]["TEXCOORD_0"].as_u64().unwrap() as usize;
     assert_eq!(floats(&root, &bin, uv, 2)[1], vec![1., 1.]);
-    assert!(primitives[2]["attributes"]["COLOR_0"].is_null());
     assert!(primitives[2]["attributes"]["TEXCOORD_0"].is_u64());
+    // --no-color drops them everywhere, and their warnings with them.
+    let result = Command::new(env!("CARGO_BIN_EXE_objtools"))
+        .arg("import")
+        .arg(f.0.join("in.obj"))
+        .arg("--no-color")
+        .arg("-o")
+        .arg(f.0.join("plain.gltf"))
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(result.status.success(), "{stderr}");
+    assert!(!stderr.contains("color"), "{stderr}");
+    let root: Value = serde_json::from_slice(&fs::read(f.0.join("plain.gltf")).unwrap()).unwrap();
+    for primitive in root["meshes"][0]["primitives"].as_array().unwrap() {
+        let attributes = primitive["attributes"].as_object().unwrap();
+        assert!(
+            attributes.keys().all(|k| !k.contains("COLOR")),
+            "{attributes:?}"
+        );
+    }
 }
 
 #[test]

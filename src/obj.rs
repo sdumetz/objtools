@@ -96,7 +96,14 @@ fn srgb_to_linear(c: f64) -> f64 {
         ((c + 0.055) / 1.055).powf(2.4)
     }
 }
-pub fn spool(source: &Path, dir: &Path, progress: bool, texture_base: Option<&Path>) -> Res<Scene> {
+/// `keep_colors` false skips vertex colours entirely, as if the file had none.
+pub fn spool(
+    source: &Path,
+    dir: &Path,
+    progress: bool,
+    texture_base: Option<&Path>,
+    keep_colors: bool,
+) -> Res<Scene> {
     let mut attrs = [
         BufWriter::new(File::create(dir.join("v"))?),
         BufWriter::new(File::create(dir.join("vt"))?),
@@ -209,6 +216,7 @@ pub fn spool(source: &Path, dir: &Path, progress: bool, texture_base: Option<&Pa
                                 warn_once(&mut warned, "v w", "vertex weights (w) are omitted");
                             }
                         }
+                        3 | 4 if !keep_colors => {}
                         n @ (3 | 4) => {
                             let mut c = [0.; 3];
                             for c in &mut c {

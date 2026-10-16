@@ -72,6 +72,7 @@ fn import(args: impl Iterator<Item = String>) -> Result<(), Box<dyn std::error::
     let mut z_up = false;
     let mut progress = false;
     let mut keep_tmp = false;
+    let mut no_color = false;
     let mut images = images::Options::default();
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -128,6 +129,7 @@ fn import(args: impl Iterator<Item = String>) -> Result<(), Box<dyn std::error::
             }
             "--progress" => progress = true,
             "--keep-tmp" => keep_tmp = true,
+            "--no-color" => no_color = true,
             _ if arg.starts_with('-') => return Err(format!("Unknown option: {arg}").into()),
             _ if input.is_none() => input = Some(PathBuf::from(arg)),
             _ => return Err(format!("Unexpected argument: {arg}").into()),
@@ -153,6 +155,7 @@ fn import(args: impl Iterator<Item = String>) -> Result<(), Box<dyn std::error::
         keep_tmp,
         images,
         quiet: false,
+        no_color,
     })
 }
 fn help() {
@@ -162,5 +165,5 @@ fn inspect_help() {
     println!("Usage: objtools inspect [OPTIONS] <file.gltf|file.obj|file.wrl|file.vrml>\n\nReport the vertex and face counts, diffuse texel count and texture occupancy of a\nmodel. OBJ and VRML are imported into a temporary workspace first, so the figures are\nthose of the glTF that `objtools import` would write.\n\n      --tmp-dir DIR  Workspace for the import and coverage maps (default: input directory)\n      --keep-tmp     Keep the workspace for debugging\n      --progress     Report progress on stderr\n  -h, --help         Show help");
 }
 fn import_help() {
-    println!("Usage: objtools import [OPTIONS] <file.obj|file.wrl|file.vrml>\n\nImport OBJ or VRML IndexedFaceSet geometry into glTF 2.0 + external .bin.\n\n  -o, --output FILE  Destination .gltf (default: input with .gltf extension)\n      --center       Subtract bounding-box center before float32 encoding\n      --up-axis AXIS Source up axis: y (default) or z; output is Y-up\n      --tmp-dir DIR  Disk-backed geometry spools (default: output directory)\n      --keep-tmp     Keep conversion workspace for debugging\n      --images MODE  auto (default), keep source references, or copy images\n      --convert-images BOOL  auto (default), true or false\n      --image-format FORMAT  jpg (default) or png\n      --image-quality N      JPG quality 1..100 (default: 95)\n      --progress     Report conversion progress on stderr\n  -h, --help         Show help");
+    println!("Usage: objtools import [OPTIONS] <file.obj|file.wrl|file.vrml>\n\nImport OBJ or VRML IndexedFaceSet geometry into glTF 2.0 + external .bin.\n\n  -o, --output FILE  Destination .gltf (default: input with .gltf extension)\n      --center       Subtract bounding-box center before float32 encoding\n      --up-axis AXIS Source up axis: y (default) or z; output is Y-up\n      --tmp-dir DIR  Disk-backed geometry spools (default: output directory)\n      --keep-tmp     Keep conversion workspace for debugging\n      --images MODE  auto (default), keep source references, or copy images\n      --convert-images BOOL  auto (default), true or false\n      --image-format FORMAT  jpg (default) or png\n      --image-quality N      JPG quality 1..100 (default: 95)\n      --no-color     Drop OBJ vertex colors\n      --progress     Report conversion progress on stderr\n  -h, --help         Show help");
 }

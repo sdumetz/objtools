@@ -66,6 +66,8 @@ pub fn run(opts: Options) -> Res<()> {
                 ..Default::default()
             },
             quiet: true,
+            // Colours change neither the vertices nor the texels counted.
+            no_color: true,
         })?;
         output
     };
