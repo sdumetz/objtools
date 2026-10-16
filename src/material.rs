@@ -20,6 +20,11 @@ pub struct Material {
     pub metallic: f64,
     pub roughness: Option<f64>,
     pub texture: Option<PathBuf>,
+    /// `map_Kd -s` and `-o`, in MTL's UV space (V up): the texture is sampled at `s·uv + o`.
+    uv_scale: [f64; 2],
+    uv_offset: [f64; 2],
+    /// `map_Kd -clamp on`: one copy of the texture rather than repeated copies.
+    pub clamp: bool,
     pub double_sided: bool,
     dissolve: bool,
 }
@@ -37,15 +42,29 @@ impl Material {
             metallic: 0.,
             roughness: None,
             texture: None,
+            uv_scale: [1.; 2],
+            uv_offset: [0.; 2],
+            clamp: false,
             double_sided: false,
             dissolve: false,
         }
+    }
+    /// `map_Kd -s`/`-o` as `KHR_texture_transform`, or `None` for the identity. glTF's V runs
+    /// down (`v = 1 − v_mtl`), so sampling at `s_v·v_mtl + o_v` becomes `s_v·v + 1 − s_v − o_v`.
+    fn uv_transform(&self) -> Option<Value> {
+        let [su, sv] = self.uv_scale;
+        let offset = [self.uv_offset[0], 1. - sv - self.uv_offset[1]];
+        (self.uv_scale != [1.; 2] || offset != [0.; 2])
+            .then(|| json!({"offset": offset, "scale": [su, sv]}))
     }
     pub fn json(&self, texture: Option<usize>) -> Value {
         let mut pbr = json!({"baseColorFactor": [self.kd[0], self.kd[1], self.kd[2], self.opacity], "metallicFactor": self.metallic,
             "roughnessFactor": self.roughness.unwrap_or_else(|| (2. / (self.ns + 2.)).powf(0.25))});
         if let Some(i) = texture {
             pbr["baseColorTexture"] = json!({"index": i});
+            if let Some(transform) = self.uv_transform() {
+                pbr["baseColorTexture"]["extensions"] = json!({"KHR_texture_transform": transform});
+            }
         }
         let mut extensions = serde_json::Map::new();
         if self.illum == 0 {
@@ -65,6 +84,98 @@ impl Material {
         json!({"name": self.name, "pbrMetallicRoughness": pbr, "emissiveFactor": self.ke, "doubleSided": self.double_sided,
             "alphaMode": if self.opacity < 1. {"BLEND"} else {"OPAQUE"}, "extensions": extensions,
             "extras": {"sourcePhong": {"Kd": self.kd, "Ks": self.ks, "Ke": self.ke, "Ns": self.ns, "Ni": self.ior, "illum": self.illum}}})
+    }
+}
+fn take_token<'a>(rest: &mut &'a str) -> &'a str {
+    let s = rest.trim_start();
+    let (token, after) = s.split_once(char::is_whitespace).unwrap_or((s, ""));
+    *rest = after;
+    token
+}
+/// Between `min` and `max` numbers: the spec makes trailing components of some options optional.
+fn take_numbers(rest: &mut &str, option: &str, min: usize, max: usize) -> Res<Vec<f64>> {
+    let mut values = Vec::new();
+    while values.len() < max {
+        let mut probe = *rest;
+        match take_token(&mut probe).parse::<f64>() {
+            Ok(v) if v.is_finite() => {
+                values.push(v);
+                *rest = probe;
+            }
+            _ => break,
+        }
+    }
+    if values.len() < min {
+        return Err(format!("map_Kd {option} expects {min} number(s)").into());
+    }
+    Ok(values)
+}
+fn take_switch(rest: &mut &str, option: &str) -> Res<bool> {
+    match take_token(rest) {
+        "on" => Ok(true),
+        "off" => Ok(false),
+        other => Err(format!("map_Kd {option} expects on or off, not {other:?}").into()),
+    }
+}
+/// Apply the options leading a `map_Kd` statement, the MTL spec's list for it plus a few that
+/// exporters also write, and return the texture path that follows, with the options whose
+/// non-default values cannot be represented and are dropped.
+///
+/// - `-s`/`-o` scale and offset the texture coordinates, becoming `KHR_texture_transform`. Both
+///   three.js (`MTLLoader`: `texture.repeat`/`offset`) and Blender (a Mapping node) sample at
+///   `s·uv + o`. The third, `w`, component has no meaning for a 2D image.
+/// - `-clamp on` maps one copy of the texture instead of repeating it. glTF's closest sampler is
+///   `CLAMP_TO_EDGE`: identical over `[0, 1]`, where it also stops bilinear filtering from
+///   bleeding in the opposite edge, but it stretches the edge texels beyond, where MTL shows the
+///   bare material. Neither three.js nor Blender applies `-clamp`.
+/// - `-mm` (value remapping) and `-t` (turbulence) have no glTF equivalent and are reported.
+/// - The rest do not affect a diffuse colour map, and are skipped like Blender skips them.
+///
+/// An option outside this list is an error: there is no telling how many arguments it takes, so
+/// where the path starts.
+fn texture_options<'a>(mut rest: &'a str, m: &mut Material) -> Res<(&'a str, Vec<&'static str>)> {
+    let mut ignored = Vec::new();
+    loop {
+        let mut after = rest;
+        let option = take_token(&mut after);
+        if !option.starts_with('-') {
+            return Ok((rest.trim(), ignored));
+        }
+        rest = after;
+        match option {
+            "-s" => {
+                let v = take_numbers(&mut rest, option, 1, 3)?;
+                m.uv_scale = [v[0], v.get(1).copied().unwrap_or(1.)];
+            }
+            "-o" => {
+                let v = take_numbers(&mut rest, option, 1, 3)?;
+                m.uv_offset = [v[0], v.get(1).copied().unwrap_or(0.)];
+            }
+            "-clamp" => m.clamp = take_switch(&mut rest, option)?,
+            "-mm" => {
+                if take_numbers(&mut rest, option, 2, 2)? != [0., 1.] {
+                    ignored.push("-mm");
+                }
+            }
+            "-t" => {
+                if take_numbers(&mut rest, option, 1, 3)?
+                    .iter()
+                    .any(|t| *t != 0.)
+                {
+                    ignored.push("-t");
+                }
+            }
+            "-blendu" | "-blendv" | "-cc" => {
+                take_switch(&mut rest, option)?;
+            }
+            "-texres" | "-boost" | "-bm" => {
+                take_numbers(&mut rest, option, 1, 1)?;
+            }
+            "-imfchan" => {
+                take_token(&mut rest);
+            }
+            _ => return Err(format!("Unsupported map_Kd option {option}").into()),
+        }
     }
 }
 fn finite(s: &str) -> Res<f64> {
@@ -132,11 +243,11 @@ pub fn load(
                 "objtools_doubleSided" => m.double_sided = rest == "1",
                 "Pr" => m.roughness = Some(finite(rest)?.clamp(0., 1.)),
                 "map_Kd" => {
-                    if rest.starts_with('-') {
-                        return Err(
-                            "map_Kd options are unsupported; bake the texture transform first"
-                                .into(),
-                        );
+                    let (rest, ignored) = texture_options(rest, m)?;
+                    for option in ignored {
+                        if unsupported.insert(format!("map_Kd {option}")) {
+                            eprintln!("Warning: map_Kd {option} is ignored in {}", path.display());
+                        }
                     }
                     let name = rest.trim_matches('"').replace('\\', "/");
                     m.texture = Some(

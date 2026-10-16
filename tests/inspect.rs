@@ -109,3 +109,28 @@ fn unsupported_inputs_are_errors() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("Unsupported input format"));
     assert_eq!(f.entries(), ["model.stl"]);
 }
+#[test]
+fn texture_transform_is_applied_as_renderers_sample() {
+    // Face 2's material maps its UVs onto face 1's texels: `s·vt + o` with V up, as in MTL.
+    // If the transform, or its conversion to glTF's flipped V, were wrong, the two triangles
+    // would cover different texels and the union would exceed one triangle's.
+    let f = Fixture::new();
+    image::RgbImage::new(64, 64)
+        .save(f.0.join("tex.png"))
+        .unwrap();
+    f.file(
+        "moved.mtl",
+        "newmtl plain\nmap_Kd tex.png\nnewmtl moved\nmap_Kd -s 0.5 0.25 1 -o 0.125 0.5 tex.png\n",
+    );
+    let positions = "v 0 0 0\nv 1 0 0\nv 0 1 0\nv 0 0 1\nv 1 0 1\nv 0 1 1\n";
+    f.file(
+        "moved.obj",
+        &format!("mtllib moved.mtl\n{positions}vt .125 .5\nvt .375 .5\nvt .125 .75\nvt 0 0\nvt .5 0\nvt 0 1\nusemtl plain\nf 1/1 2/2 3/3\nusemtl moved\nf 4/4 5/5 6/6\n"),
+    );
+    f.file("baked.mtl", "newmtl plain\nmap_Kd tex.png\n");
+    f.file(
+        "baked.obj",
+        &format!("mtllib baked.mtl\n{positions}vt .125 .5\nvt .375 .5\nvt .125 .75\nusemtl plain\nf 1/1 2/2 3/3\nf 4/1 5/2 6/3\n"),
+    );
+    assert_eq!(f.inspect("moved.obj"), f.inspect("baked.obj"));
+}

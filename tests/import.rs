@@ -845,6 +845,65 @@ fn trailing_backslash_continues_statements_but_not_comments() {
 }
 
 #[test]
+fn map_kd_options_become_texture_transform_and_clamp() {
+    let f = Fixture::new();
+    image::RgbImage::new(2, 2)
+        .save(f.0.join("wood grain.png"))
+        .unwrap();
+    f.file(
+        "in.mtl",
+        "newmtl plain\nmap_Kd -s 1 1 1 -o 0 0 0 -blendu off -cc on wood grain.png\n\
+         newmtl tiled\nmap_Kd -s 2 4 1 -o 0.25 -0.5 0 -clamp on -bm 1 -imfchan r -texres 512 -mm 0 2 -t 0.1 wood grain.png\n",
+    );
+    f.file(
+        "in.obj",
+        "mtllib in.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nvt 0 0\nusemtl plain\nf 1/1 2/1 3/1\nusemtl tiled\nf 1/1 2/1 3/1\n",
+    );
+    let result = f.import("in.obj", false);
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(result.status.success(), "{stderr}");
+    assert!(stderr.contains("map_Kd -mm is ignored"), "{stderr}");
+    assert!(stderr.contains("map_Kd -t is ignored"), "{stderr}");
+    let (root, _) = f.result();
+    // One image, sampled by two textures: repeat for `plain`, clamp for `tiled`.
+    assert_eq!(root["images"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        root["samplers"],
+        serde_json::json!([{"wrapS":10497,"wrapT":10497},{"wrapS":33071,"wrapT":33071}])
+    );
+    let info = |m: usize| &root["materials"][m]["pbrMetallicRoughness"]["baseColorTexture"];
+    let sampler =
+        |m: usize| root["textures"][info(m)["index"].as_u64().unwrap() as usize]["sampler"].clone();
+    assert_eq!(root["materials"][0]["name"], "plain");
+    assert_eq!(sampler(0), 0);
+    assert_eq!(sampler(1), 1);
+    // Identity options add nothing; `-s 2 4 -o 0.25 -0.5` samples at 2u + 0.25 and, with V
+    // flipped, 4v + 1 - 4 + 0.5.
+    assert!(info(0).get("extensions").is_none());
+    assert_eq!(
+        info(1)["extensions"]["KHR_texture_transform"],
+        serde_json::json!({"offset": [0.25, -2.5], "scale": [2., 4.]})
+    );
+    assert_eq!(
+        root["extensionsUsed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| *e == "KHR_texture_transform")
+            .count(),
+        1
+    );
+    assert!(root.get("extensionsRequired").is_none());
+    // An option outside the spec's list leaves no way to find the path.
+    let f = Fixture::new();
+    f.file("in.mtl", "newmtl x\nmap_Kd -zoom 2 a.png\n");
+    f.file("in.obj", "mtllib in.mtl\nv 0 0 0\n");
+    let result = f.import("in.obj", false);
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("Unsupported map_Kd option -zoom"));
+}
+
+#[test]
 fn faces_with_fewer_than_three_corners_are_omitted() {
     let f = Fixture::new();
     f.file(

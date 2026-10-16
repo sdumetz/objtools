@@ -92,7 +92,7 @@ Phong and PBR cannot be matched exactly. The conversion policy is intentionally 
 | Source | glTF mapping |
 | --- | --- |
 | `Kd` | Linear `baseColorFactor`; default `[0.8, 0.8, 0.8]` |
-| `map_Kd` | sRGB base-color texture, multiplied by `Kd`; image policy below, URI escaped |
+| `map_Kd` | sRGB base-color texture, multiplied by `Kd`; image policy below, URI escaped. Options: see below |
 | `Ns` | Approximate perceptual roughness `(2 / (Ns + 2))^(1/4)` |
 | `Ks` | `KHR_materials_specular`, interpreted approximately as normal-incidence reflectance |
 | `Ni` | `KHR_materials_ior`; default 1.5 |
@@ -110,7 +110,14 @@ Material colors and opacity are clamped to `[0,1]`, shininess to nonnegative val
 
 VRML material defaults are preserved, including zero specular color, shininess 0.2, transparency and emissive color. VRML shininess is converted to an exponent using a scale of 128. `solid FALSE` becomes `doubleSided`.
 
-Unsupported MTL maps/properties warn explicitly. `map_Kd` options, missing textures and image formats that cannot be decoded (or require disabled conversion) are errors. Faces without UVs cannot sample a texture, and glTF forbids their primitive from referencing one, so they use a copy of their material without the texture, named `<material>-untextured`, as obj2gltf does; a warning counts them. Separate opacity/specular/bump maps are not baked into PBR textures. Both OBJ and VRML UVs have V flipped for glTF's texture convention.
+`map_Kd` options from the MTL spec are honoured where glTF can express them:
+
+- `-s` and `-o` scale and offset the texture coordinates. They become `KHR_texture_transform` (in `extensionsUsed`), sampling at `s·uv + o` as three.js and Blender do, with the offset converted for glTF's flipped V. The `w` component is ignored.
+- `-clamp on` becomes a `CLAMP_TO_EDGE` sampler. That is identical within the 0–1 range, but beyond it glTF stretches the edge texels where MTL leaves the bare material; glTF has no closer mode.
+- Non-default `-mm` and `-t` cannot be represented and are ignored with a warning. `-blendu`, `-blendv`, `-cc`, `-texres`, `-boost`, `-bm` and `-imfchan` do not affect a diffuse map and are skipped.
+- Any other option is an error, since its argument count, and so where the path starts, is unknown.
+
+Unsupported MTL maps/properties warn explicitly. Missing textures and image formats that cannot be decoded (or require disabled conversion) are errors. Faces without UVs cannot sample a texture, and glTF forbids their primitive from referencing one, so they use a copy of their material without the texture, named `<material>-untextured`, as obj2gltf does; a warning counts them. Separate opacity/specular/bump maps are not baked into PBR textures. Both OBJ and VRML UVs have V flipped for glTF's texture convention.
 
 Policy references: [KHR_materials_specular](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_materials_specular), [VRML lighting model](https://www.web3d.org/documents/specifications/14772/V2.0/part1/concepts.html).
 

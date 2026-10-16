@@ -429,6 +429,10 @@ fn write_with_limit(
         .unwrap_or(Path::new("."));
     let mut textures = Vec::new();
     let mut images = Vec::new();
+    let mut samplers = Vec::new();
+    let mut image_ids = HashMap::new();
+    let mut sampler_ids = HashMap::new();
+    // An image sampled with both wrap modes is one image and two textures.
     let mut texture_ids = HashMap::new();
     let mut materials = Vec::new();
     let mut extensions = BTreeSet::new();
@@ -459,19 +463,28 @@ fn write_with_limit(
                 fs::canonicalize(path).map_err(|e| format!("Texture {}: {e}", path.display()))?;
             let plan = &image_plans[&path];
             blend = transparent.contains(&path);
-            if let Some(id) = texture_ids.get(&path) {
-                Some(*id)
-            } else {
-                let id = images.len();
-                if let Some(name) = &plan.publish_name {
-                    let mut dst = create(&parent.join(name), &mut outputs)?;
-                    std::io::copy(&mut File::open(&plan.content)?, &mut dst)?;
+            let image = match image_ids.get(&path) {
+                Some(id) => *id,
+                None => {
+                    if let Some(name) = &plan.publish_name {
+                        let mut dst = create(&parent.join(name), &mut outputs)?;
+                        std::io::copy(&mut File::open(&plan.content)?, &mut dst)?;
+                    }
+                    images.push(json!({"uri":plan.uri}));
+                    image_ids.insert(path.clone(), images.len() - 1);
+                    images.len() - 1
                 }
-                images.push(json!({"uri":plan.uri}));
-                textures.push(json!({"source":id,"sampler":0}));
-                texture_ids.insert(path, id);
-                Some(id)
-            }
+            };
+            let sampler = *sampler_ids.entry(m.clamp).or_insert_with(|| {
+                // CLAMP_TO_EDGE for `map_Kd -clamp on`, otherwise REPEAT, glTF's default.
+                let wrap = if m.clamp { 33071 } else { 10497 };
+                samplers.push(json!({"wrapS":wrap,"wrapT":wrap}));
+                samplers.len() - 1
+            });
+            Some(*texture_ids.entry((path, m.clamp)).or_insert_with(|| {
+                textures.push(json!({"source":image,"sampler":sampler}));
+                textures.len() - 1
+            }))
         } else {
             None
         };
@@ -482,7 +495,13 @@ fn write_with_limit(
         if blend {
             value["alphaMode"] = json!("BLEND");
         }
-        for name in value["extensions"].as_object().unwrap().keys() {
+        let texture_extensions = &value["pbrMetallicRoughness"]["baseColorTexture"]["extensions"];
+        for name in value["extensions"].as_object().unwrap().keys().chain(
+            texture_extensions
+                .as_object()
+                .into_iter()
+                .flat_map(|e| e.keys()),
+        ) {
             extensions.insert(name.clone());
         }
         materials.push(value);
@@ -514,7 +533,7 @@ fn write_with_limit(
     if !images.is_empty() {
         root["images"] = json!(images);
         root["textures"] = json!(textures);
-        root["samplers"] = json!([{"wrapS":10497,"wrapT":10497}]);
+        root["samplers"] = json!(samplers);
     }
     let mut dst = BufWriter::new(create(&bin_path, &mut outputs)?);
     std::io::copy(&mut File::open(bin_spool)?, &mut dst)?;
