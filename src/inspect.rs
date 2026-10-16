@@ -194,6 +194,47 @@ impl<'a> Accessor<'a> {
     }
 }
 /// `path` as seen from `base`, both canonical; unchanged across filesystem roots.
+/// `KHR_texture_transform`, the UVs a renderer actually samples with: `T · R · S · uv`, from the
+/// extension's reference shader (GLSL matrices are column-major, so R's first column is
+/// `(cos, sin)`).
+struct UvTransform {
+    rows: [[f64; 3]; 2],
+    /// Overrides the texture info's `texCoord` set.
+    tex_coord: Option<u64>,
+}
+impl UvTransform {
+    fn new(ext: &Value) -> Res<Self> {
+        let pair = |key: &str, default: f64| -> Res<[f64; 2]> {
+            match ext.get(key) {
+                None => Ok([default; 2]),
+                Some(v) => {
+                    let v = v.as_array().filter(|a| a.len() == 2);
+                    let n = |i: usize| v.and_then(|a| a[i].as_f64());
+                    match (n(0), n(1)) {
+                        (Some(a), Some(b)) => Ok([a, b]),
+                        _ => Err(format!("KHR_texture_transform {key} must be two numbers").into()),
+                    }
+                }
+            }
+        };
+        let [ox, oy] = pair("offset", 0.)?;
+        let [sx, sy] = pair("scale", 1.)?;
+        let r = match ext.get("rotation") {
+            None => 0.,
+            Some(r) => r
+                .as_f64()
+                .ok_or("KHR_texture_transform rotation must be a number")?,
+        };
+        let (s, c) = r.sin_cos();
+        Ok(Self {
+            rows: [[c * sx, -s * sy, ox], [s * sx, c * sy, oy]],
+            tex_coord: ext.get("texCoord").and_then(Value::as_u64),
+        })
+    }
+    fn apply(&self, [u, v]: [f64; 2]) -> [f64; 2] {
+        self.rows.map(|r| r[0] * u + r[1] * v + r[2])
+    }
+}
 fn relative(path: &Path, base: &Path) -> PathBuf {
     let (to, from): (Vec<_>, Vec<_>) = (path.components().collect(), base.components().collect());
     let common = to.iter().zip(&from).take_while(|(a, b)| a == b).count();
@@ -309,9 +350,7 @@ fn inspect(path: &Path, display_base: &Path, workspace: &Path, progress: bool) -
         if info.is_null() {
             continue;
         }
-        if info["extensions"].get("KHR_texture_transform").is_some() {
-            return Err("KHR_texture_transform is unsupported".into());
-        }
+        let transform = UvTransform::new(&info["extensions"]["KHR_texture_transform"])?;
         let texture = element(&root, "textures", index(&info["index"], "texture")?)?;
         // A missing sampler means repeat wrapping and engine-default (linear) filtering.
         let (wrap, filter) = match texture["sampler"].as_u64() {
@@ -326,7 +365,9 @@ fn inspect(path: &Path, display_base: &Path, workspace: &Path, progress: bool) -
         };
         let image = index(&texture["source"], "texture source image")?;
         let target = &mut textures.get_mut(&image).unwrap().coverage;
-        let set = info["texCoord"].as_u64().unwrap_or(0);
+        let set = transform
+            .tex_coord
+            .unwrap_or(info["texCoord"].as_u64().unwrap_or(0));
         let uv = attributes
             .get(format!("TEXCOORD_{set}"))
             .ok_or_else(|| format!("Textured primitive has no TEXCOORD_{set}"))?;
@@ -339,7 +380,7 @@ fn inspect(path: &Path, display_base: &Path, workspace: &Path, progress: bool) -
             if i >= uv.count {
                 return Err(format!("Index {i} outside {} vertices", uv.count).into());
             }
-            Ok([uv.get(i, 0), uv.get(i, 1)])
+            Ok(transform.apply([uv.get(i, 0), uv.get(i, 1)]))
         };
         for t in 0..triangles {
             let ks = match mode {
@@ -420,4 +461,22 @@ fn report<'a>(
         }
     }
     out
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn texture_transform_follows_the_reference_shader() {
+        let t = |ext: Value| UvTransform::new(&ext).unwrap();
+        assert_eq!(t(Value::Null).apply([0.3, 0.7]), [0.3, 0.7]);
+        let scaled = t(serde_json::json!({"offset": [0.5, -1], "scale": [2, 4], "texCoord": 1}));
+        assert_eq!(scaled.apply([0.25, 0.5]), [1., 1.]);
+        assert_eq!(scaled.tex_coord, Some(1));
+        // Rotation applies after scale and before offset; its matrix's first column is (cos, sin).
+        let rotated =
+            t(serde_json::json!({"rotation": std::f64::consts::FRAC_PI_2, "scale": [2, 1]}));
+        let [u, v] = rotated.apply([1., 0.]);
+        assert!(u.abs() < 1e-12 && (v - 2.).abs() < 1e-12, "{u} {v}");
+        assert!(UvTransform::new(&serde_json::json!({"scale": [1]})).is_err());
+    }
 }
