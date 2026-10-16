@@ -178,7 +178,17 @@ pub fn spool(source: &Path, dir: &Path, progress: bool, texture_base: Option<&Pa
             start_line = line_no;
         }
         let text = if continued { joined.trim() } else { stripped };
-        let (key, rest) = text.split_once(char::is_whitespace).unwrap_or((text, ""));
+        let (written, rest) = text.split_once(char::is_whitespace).unwrap_or((text, ""));
+        // Keywords match whatever their case, as in obj2gltf and three.js, as a safety net for
+        // exporters that capitalise them. No two OBJ keywords differ only by case. Only keys
+        // that need it are lowercased, so `v` lines allocate nothing.
+        let lowered;
+        let key = if written.bytes().any(|b| b.is_ascii_uppercase()) {
+            lowered = written.to_ascii_lowercase();
+            lowered.as_str()
+        } else {
+            written
+        };
         let rest = rest.trim();
         let result: Res<()> = (|| {
             match key {
@@ -324,7 +334,7 @@ pub fn spool(source: &Path, dir: &Path, progress: bool, texture_base: Option<&Pa
                 "" | "s" | "g" => {}
                 _ => {
                     if warned.insert(key.to_owned()) {
-                        eprintln!("Warning: unsupported OBJ record {key} is omitted");
+                        eprintln!("Warning: unsupported OBJ record {written} is omitted");
                     }
                 }
             }

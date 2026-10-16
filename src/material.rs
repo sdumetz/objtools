@@ -239,7 +239,11 @@ pub fn load(
     for (line_no, line) in reader.lines().enumerate() {
         let line = line?;
         let line = line.split('#').next().unwrap().trim();
-        let (key, rest) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
+        let (written, rest) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
+        // Keywords match whatever their case, as in obj2gltf and three.js: `map_kd` and `KD`
+        // turn up in the wild, and no two MTL keywords differ only by case.
+        let key = written.to_ascii_lowercase();
+        let key = key.as_str();
         if key == "newmtl" {
             if let Some(m) = current.take() {
                 materials.insert(m.name.clone(), m);
@@ -251,11 +255,11 @@ pub fn load(
         let rest = rest.trim();
         let result: Res<()> = (|| {
             match key {
-                "Kd" => m.kd = color(rest)?,
-                "Ks" => m.ks = color(rest)?,
-                "Ke" => m.ke = color(rest)?,
-                "Ns" => m.ns = finite(rest)?.max(0.),
-                "Ni" => {
+                "kd" => m.kd = color(rest)?,
+                "ks" => m.ks = color(rest)?,
+                "ke" => m.ke = color(rest)?,
+                "ns" => m.ns = finite(rest)?.max(0.),
+                "ni" => {
                     m.ior = finite(rest)?;
                     if m.ior < 1. {
                         return Err("Ni must be >= 1".into());
@@ -268,11 +272,11 @@ pub fn load(
                     m.opacity = finite(rest)?.clamp(0., 1.);
                     m.dissolve = true;
                 }
-                "Tr" if !m.dissolve => m.opacity = 1. - finite(rest)?.clamp(0., 1.),
-                "Tr" => {}
+                "tr" if !m.dissolve => m.opacity = 1. - finite(rest)?.clamp(0., 1.),
+                "tr" => {}
                 "illum" => m.illum = rest.parse()?,
                 // `Kt` is an alias some exporters write, read by Blender too.
-                "Tf" | "Kt" => match color(rest) {
+                "tf" | "kt" => match color(rest) {
                     Ok(tf) => m.transmission_filter = Some(tf),
                     Err(e) => {
                         if unsupported.insert(key.to_owned()) {
@@ -280,10 +284,10 @@ pub fn load(
                         }
                     }
                 },
-                "Pm" => m.metallic = finite(rest)?.clamp(0., 1.),
-                "objtools_doubleSided" => m.double_sided = rest == "1",
-                "Pr" => m.roughness = Some(finite(rest)?.clamp(0., 1.)),
-                "map_Kd" => {
+                "pm" => m.metallic = finite(rest)?.clamp(0., 1.),
+                "objtools_doublesided" => m.double_sided = rest == "1",
+                "pr" => m.roughness = Some(finite(rest)?.clamp(0., 1.)),
+                "map_kd" => {
                     let (rest, ignored) = texture_options(rest, m)?;
                     for option in ignored {
                         if unsupported.insert(format!("map_Kd {option}")) {
@@ -297,11 +301,11 @@ pub fn load(
                             .join(name),
                     );
                 }
-                "" | "Ka" => {}
+                "" | "ka" => {}
                 _ => {
                     if unsupported.insert(key.to_owned()) {
                         eprintln!(
-                            "Warning: unsupported MTL property {key} in {}",
+                            "Warning: unsupported MTL property {written} in {}",
                             path.display()
                         );
                     }

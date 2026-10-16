@@ -940,6 +940,36 @@ fn fully_transparent_materials_warn_once_unless_glass() {
 }
 
 #[test]
+fn keywords_match_whatever_their_case() {
+    let f = Fixture::new();
+    f.file(
+        "in.mtl",
+        "NEWMTL Paint\nKD 0.5 0.25 1\nTR 0.5\nMAP_KS shine.png\n",
+    );
+    f.file(
+        "in.obj",
+        "MTLLIB in.mtl\nV 0 0 0\nV 1 0 0\nV 0 1 0\nVN 0 0 1\nO Thing\nUSEMTL Paint\nF 1//1 2//1 3//1\nCSTYPE bezier\n",
+    );
+    let result = f.import("in.obj", false);
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(result.status.success(), "{stderr}");
+    // Unsupported keywords are still reported as written.
+    assert!(
+        stderr.contains("unsupported MTL property MAP_KS"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("unsupported OBJ record CSTYPE"), "{stderr}");
+    let (root, _) = f.result();
+    assert_eq!(root["meshes"][0]["name"], "Thing");
+    let material = &root["materials"][0];
+    assert_eq!(material["name"], "Paint");
+    assert_eq!(
+        material["pbrMetallicRoughness"]["baseColorFactor"],
+        serde_json::json!([0.5, 0.25, 1., 0.5])
+    );
+}
+
+#[test]
 fn faces_with_fewer_than_three_corners_are_omitted() {
     let f = Fixture::new();
     f.file(
