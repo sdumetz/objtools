@@ -15,6 +15,8 @@ pub struct Material {
     pub ke: [f64; 3],
     pub ns: f64,
     pub opacity: f64,
+    /// `Tf`, the colour filter for light passing through a refracting material.
+    transmission_filter: Option<[f64; 3]>,
     pub illum: u32,
     pub ior: f64,
     pub metallic: f64,
@@ -37,6 +39,7 @@ impl Material {
             ke: [0.; 3],
             ns: 0.,
             opacity: 1.,
+            transmission_filter: None,
             illum: 2,
             ior: 1.5,
             metallic: 0.,
@@ -57,8 +60,31 @@ impl Material {
         (self.uv_scale != [1.; 2] || offset != [0.; 2])
             .then(|| json!({"offset": offset, "scale": [su, sv]}))
     }
+    /// MTL has two kinds of transparency, as glTF does. `d` dissolves the surface "unlike a real
+    /// transparent material", which is glTF's alpha as coverage. Only the transparent `illum`
+    /// models describe light passing through, which is `KHR_materials_transmission`:
+    /// - 4 and 9, "Glass on": an almost transparent surface that keeps its highlights. There the
+    ///   dissolve sets the transmission instead of the coverage.
+    /// - 6 and 7, "Refraction on": light passes through filtered by `Tf`, whose mean gives the
+    ///   transmission. glTF tints transmitted light with the base colour, so `Tf`'s own colour is
+    ///   not kept. `d` still dissolves, since it "works on all illumination models".
+    ///
+    /// `Tf` under any other model is ignored. Some exporters write `Tf 1 1 1` on every material,
+    /// and those materials must not turn into glass.
+    /// Returns the coverage alpha and the transmission factor.
+    fn transparency(&self) -> (f64, f64) {
+        match self.illum {
+            4 | 9 => (1., 1. - self.opacity),
+            6 | 7 => {
+                let tf = self.transmission_filter.unwrap_or([0.; 3]);
+                (self.opacity, tf.iter().sum::<f64>() / 3.)
+            }
+            _ => (self.opacity, 0.),
+        }
+    }
     pub fn json(&self, texture: Option<usize>) -> Value {
-        let mut pbr = json!({"baseColorFactor": [self.kd[0], self.kd[1], self.kd[2], self.opacity], "metallicFactor": self.metallic,
+        let (alpha, transmission) = self.transparency();
+        let mut pbr = json!({"baseColorFactor": [self.kd[0], self.kd[1], self.kd[2], alpha], "metallicFactor": self.metallic,
             "roughnessFactor": self.roughness.unwrap_or_else(|| (2. / (self.ns + 2.)).powf(0.25))});
         if let Some(i) = texture {
             pbr["baseColorTexture"] = json!({"index": i});
@@ -81,9 +107,15 @@ impl Material {
                 extensions.insert("KHR_materials_ior".into(), json!({"ior": self.ior}));
             }
         }
+        if transmission > 0. {
+            extensions.insert(
+                "KHR_materials_transmission".into(),
+                json!({"transmissionFactor": transmission}),
+            );
+        }
         json!({"name": self.name, "pbrMetallicRoughness": pbr, "emissiveFactor": self.ke, "doubleSided": self.double_sided,
-            "alphaMode": if self.opacity < 1. {"BLEND"} else {"OPAQUE"}, "extensions": extensions,
-            "extras": {"sourcePhong": {"Kd": self.kd, "Ks": self.ks, "Ke": self.ke, "Ns": self.ns, "Ni": self.ior, "illum": self.illum}}})
+            "alphaMode": if alpha < 1. {"BLEND"} else {"OPAQUE"}, "extensions": extensions,
+            "extras": {"sourcePhong": {"Kd": self.kd, "Ks": self.ks, "Ke": self.ke, "Ns": self.ns, "Ni": self.ior, "d": self.opacity, "Tf": self.transmission_filter, "illum": self.illum}}})
     }
 }
 fn take_token<'a>(rest: &mut &'a str) -> &'a str {
@@ -239,6 +271,15 @@ pub fn load(
                 "Tr" if !m.dissolve => m.opacity = 1. - finite(rest)?.clamp(0., 1.),
                 "Tr" => {}
                 "illum" => m.illum = rest.parse()?,
+                // `Kt` is an alias some exporters write, read by Blender too.
+                "Tf" | "Kt" => match color(rest) {
+                    Ok(tf) => m.transmission_filter = Some(tf),
+                    Err(e) => {
+                        if unsupported.insert(key.to_owned()) {
+                            eprintln!("Warning: {key} ignored in {}: {e}", path.display());
+                        }
+                    }
+                },
                 "Pm" => m.metallic = finite(rest)?.clamp(0., 1.),
                 "objtools_doubleSided" => m.double_sided = rest == "1",
                 "Pr" => m.roughness = Some(finite(rest)?.clamp(0., 1.)),
@@ -308,5 +349,36 @@ mod tests {
         );
         m.illum = 0;
         assert!(m.json(None)["extensions"]["KHR_materials_unlit"].is_object());
+    }
+    #[test]
+    fn transparency_follows_illumination_models() {
+        let mut m = Material::new("glass");
+        m.opacity = 0.25;
+        m.transmission_filter = Some([1.; 3]);
+        let summary = |m: &Material| {
+            let j = m.json(None);
+            (
+                j["pbrMetallicRoughness"]["baseColorFactor"][3]
+                    .as_f64()
+                    .unwrap(),
+                j["alphaMode"].as_str().unwrap().to_owned(),
+                j["extensions"]["KHR_materials_transmission"]["transmissionFactor"].as_f64(),
+            )
+        };
+        // Dissolve is coverage, and `Tf` alone does not make glass.
+        assert_eq!(summary(&m), (0.25, "BLEND".into(), None));
+        // Glass: the dissolve becomes transmission, and the surface is all there.
+        m.illum = 4;
+        assert_eq!(summary(&m), (1., "OPAQUE".into(), Some(0.75)));
+        m.illum = 9;
+        m.opacity = 1.;
+        assert_eq!(summary(&m), (1., "OPAQUE".into(), None));
+        // Refraction: `Tf` transmits, and dissolve still applies.
+        m.illum = 7;
+        m.opacity = 0.5;
+        m.transmission_filter = Some([0., 1., 0.5]);
+        assert_eq!(summary(&m), (0.5, "BLEND".into(), Some(0.5)));
+        m.transmission_filter = None;
+        assert_eq!(summary(&m), (0.5, "BLEND".into(), None));
     }
 }
