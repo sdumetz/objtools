@@ -102,7 +102,7 @@ Phong and PBR cannot be matched exactly. The conversion policy is intentionally 
 | `illum 0` | `KHR_materials_unlit` |
 | `illum 1` | Specular disabled |
 
-Metalness defaults to zero: a large or colored `Ks` alone does not establish that a surface is metallic. With IOR 1.5, `Ks` is represented by `specularColorFactor = Ks / 0.04`; other IOR values use their corresponding Fresnel reflectance. IOR 1 produces zero dielectric reflectance. This preserves the approximate specular color/intensity for extension-aware viewers without inventing metalness. Core-only viewers use the metallic-roughness fallback and will render different specular responses. Extensions are listed in `extensionsUsed`, not required.
+Metalness defaults to zero: a large or colored `Ks` alone does not establish that a surface is metallic. With IOR 1.5, `Ks` is represented by `specularColorFactor = Ks / 0.04`; other IOR values use their corresponding Fresnel reflectance. IOR 1 produces zero dielectric reflectance. This preserves the approximate specular color/intensity for extension-aware viewers without inventing metalness. Core-only viewers use the metallic-roughness fallback and will render different specular responses. These material extensions are listed in `extensionsUsed`, not required, since core-only viewers still render a close fallback.
 
 An alpha channel alone does not make a texture transparent: baking and photogrammetry tools often write RGBA PNGs whose alpha is 255 everywhere, and blending them would cost sorting artefacts and a transparent render pass for nothing. PNG textures are therefore decoded row by row on a background thread during the geometry conversion, so even a 16k texture adds only a row of memory and no wall time.
 
@@ -112,7 +112,7 @@ VRML material defaults are preserved, including zero specular color, shininess 0
 
 `map_Kd` options from the MTL spec are honoured where glTF can express them:
 
-- `-s` and `-o` scale and offset the texture coordinates. They become `KHR_texture_transform` (in `extensionsUsed`), sampling at `s·uv + o` as three.js and Blender do, with the offset converted for glTF's flipped V. The `w` component is ignored.
+- `-s` and `-o` scale and offset the texture coordinates. They become `KHR_texture_transform`, listed in `extensionsRequired` because a viewer without it would place the texture wrongly, sampling at `s·uv + o` as three.js and Blender do, with the offset converted for glTF's flipped V. The `w` component is ignored.
 - `-clamp on` becomes a `CLAMP_TO_EDGE` sampler. That is identical within the 0–1 range, but beyond it glTF stretches the edge texels where MTL leaves the bare material; glTF has no closer mode.
 - Non-default `-mm` and `-t` cannot be represented and are ignored with a warning. `-blendu`, `-blendv`, `-cc`, `-texres`, `-boost`, `-bm` and `-imfchan` do not affect a diffuse map and are skipped.
 - Any other option is an error, since its argument count, and so where the path starts, is unknown.

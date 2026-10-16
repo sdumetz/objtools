@@ -530,6 +530,11 @@ fn write_with_limit(
         "buffers":[{"uri":uri(&bin_path.file_name().unwrap().to_string_lossy()),"byteLength":document.offset}],
         "bufferViews":document.views,"accessors":document.accessors,"materials":materials,
         "extensionsUsed":extensions,"extras":{"objtools":{"origin":origin_strings,"sourceBounds":scene.bbox.to_record(),"centered":center,"sourceUpAxis":if z_up {"z"} else {"y"},"coordinateConvention":"Source units preserved (assumed metres); no CRS inferred"}}});
+    // Without the transform a texture lands in the wrong place, so a viewer that cannot apply
+    // it must refuse the model rather than show it wrong. Other extensions degrade gracefully.
+    if extensions.contains("KHR_texture_transform") {
+        root["extensionsRequired"] = json!(["KHR_texture_transform"]);
+    }
     if !images.is_empty() {
         root["images"] = json!(images);
         root["textures"] = json!(textures);

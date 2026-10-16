@@ -808,6 +808,7 @@ fn faces_without_uvs_get_an_untextured_copy_of_their_material() {
         }
     }
     assert_eq!(root["materials"].as_array().unwrap().len(), 2);
+    assert!(root.get("extensionsRequired").is_none());
 }
 
 #[test]
@@ -893,7 +894,10 @@ fn map_kd_options_become_texture_transform_and_clamp() {
             .count(),
         1
     );
-    assert!(root.get("extensionsRequired").is_none());
+    assert_eq!(
+        root["extensionsRequired"],
+        serde_json::json!(["KHR_texture_transform"])
+    );
     // An option outside the spec's list leaves no way to find the path.
     let f = Fixture::new();
     f.file("in.mtl", "newmtl x\nmap_Kd -zoom 2 a.png\n");
