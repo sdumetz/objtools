@@ -135,7 +135,7 @@ pub fn format_triple(v: [i64; 3]) -> String {
 
 /// An axis-aligned bounding box in fixed-point coordinates.
 ///
-/// Empty until the first vertex is added, so a group with no geometry reports no bounds rather
+/// Empty until the first vertex is added, so an input without vertices reports no bounds rather
 /// than a box collapsed on the origin.
 #[derive(Clone, Copy, Default)]
 pub struct BBox {
@@ -163,14 +163,6 @@ impl BBox {
         }
     }
 
-    #[cfg(test)]
-    pub fn merge(&mut self, other: &BBox) {
-        if let Some((min, max)) = other.bounds {
-            self.add(min);
-            self.add(max);
-        }
-    }
-
     /// Extent along each axis. Widened to `i128` because `max - min` can exceed `i64` even
     /// when both ends are representable.
     pub fn size(&self) -> Option<[i128; 3]> {
@@ -182,7 +174,7 @@ impl BBox {
         ])
     }
 
-    /// Midpoint of the box — the reference point `translate --center` subtracts.
+    /// Midpoint of the box, the origin `--center` subtracts.
     /// Computed in `i128` so the intermediate sum cannot overflow; the result always lies inside
     /// the box and so is representable.
     pub fn center(&self) -> Option<[i64; 3]> {
@@ -355,20 +347,5 @@ mod tests {
         b.add(parse_three_fixed("651000.0000000001 0 0").unwrap());
         b.add(parse_three_fixed("651000.0000000003 0 0").unwrap());
         assert_eq!(format_triple(b.center().unwrap()), "651000.0000000002 0 0");
-    }
-
-    #[test]
-    fn merge_combines_two_boxes() {
-        let mut a = BBox::new();
-        a.add(parse_three_fixed("0 0 0").unwrap());
-        let mut b = BBox::new();
-        b.add(parse_three_fixed("5 -5 1").unwrap());
-
-        a.merge(&b);
-        assert_eq!(a.range_str().unwrap(), "0 -5 0 → 5 0 1");
-
-        // merging an empty box changes nothing
-        a.merge(&BBox::new());
-        assert_eq!(a.range_str().unwrap(), "0 -5 0 → 5 0 1");
     }
 }

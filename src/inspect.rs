@@ -195,7 +195,6 @@ impl<'a> Accessor<'a> {
         }
     }
 }
-/// `path` as seen from `base`, both canonical; unchanged across filesystem roots.
 /// `KHR_texture_transform`, the UVs a renderer actually samples with: `T · R · S · uv`, from the
 /// extension's reference shader (GLSL matrices are column-major, so R's first column is
 /// `(cos, sin)`).
@@ -237,6 +236,7 @@ impl UvTransform {
         self.rows.map(|r| r[0] * u + r[1] * v + r[2])
     }
 }
+/// `path` as seen from `base`, both canonical; unchanged across filesystem roots.
 fn relative(path: &Path, base: &Path) -> PathBuf {
     let (to, from): (Vec<_>, Vec<_>) = (path.components().collect(), base.components().collect());
     let common = to.iter().zip(&from).take_while(|(a, b)| a == b).count();

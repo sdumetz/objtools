@@ -288,7 +288,7 @@ fn errors_leave_no_output_and_do_not_overwrite() {
     assert!(!f.import("in.obj", false).status.success());
     assert_eq!(fs::read_to_string(f.0.join("out.bin")).unwrap(), "existing");
     let result = Command::new(env!("CARGO_BIN_EXE_objtools"))
-        .args(["split", "in.obj"])
+        .args(["unknown", "in.obj"])
         .output()
         .unwrap();
     assert!(!result.status.success());

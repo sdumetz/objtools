@@ -20,14 +20,6 @@ pub struct Options {
     /// Drop OBJ vertex colours instead of writing `COLOR_0`/`_COLOR`.
     pub no_color: bool,
 }
-// Private disk-backed adapter used by the VRML reader.
-pub struct ImportOptions {
-    pub file_path: String,
-    pub output: Option<String>,
-    pub tmp_dir: PathBuf,
-    pub keep_tmp: bool,
-    pub progress: bool,
-}
 /// A private directory removed on drop, including when a command bails out early.
 pub struct Workspace {
     pub path: PathBuf,
@@ -74,13 +66,7 @@ pub fn run(opts: Options) -> Res<()> {
         opts.input.clone()
     } else {
         let intermediate = workspace.path.join("source.obj");
-        crate::vrml::convert(&ImportOptions {
-            file_path: opts.input.to_string_lossy().into_owned(),
-            output: Some(intermediate.to_string_lossy().into_owned()),
-            tmp_dir: workspace.path.clone(),
-            keep_tmp: false,
-            progress: opts.progress,
-        })?;
+        crate::vrml::convert(&opts.input, &intermediate, &workspace.path, opts.progress)?;
         intermediate
     };
     let texture_base = opts

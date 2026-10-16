@@ -1,25 +1,23 @@
-//! VRML (`.wrl`) → Wavefront OBJ.
+//! VRML (`.wrl`) → Wavefront OBJ and MTL, which the import then reads like any other OBJ.
 //!
 //! VRML puts its geometry in `IndexedFaceSet` nodes, which is a poor match for OBJ in one
 //! specific way: a face's position indices and its texture-coordinate indices live in two
 //! separate arrays (`coordIndex` / `texCoordIndex`) that pair up positionally, and the file is
 //! free to put them in either order. OBJ wants them woven together on one `f` line. So the index
 //! arrays are spooled to fixed-width binary temp files as they stream past, and the faces are
-//! written at the end of each `Shape`, when every array is known — the same trick `split` uses,
-//! and for the same reason: it keeps memory flat regardless of how big the mesh is.
+//! written at the end of each `Shape`, when every array is known. Memory stays flat however big
+//! the mesh is.
 //!
 //! Coordinates go through the fixed-point parser, so a georeferenced `.wrl` converts to OBJ
 //! without losing a digit.
 
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, ErrorKind, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::fixed::{format_fixed_as_decimal, parse_decimal_fixed};
 use crate::format::fmt_bytes;
-use crate::import::ImportOptions;
-use crate::tmp::TmpGuard;
 
 type Res<T> = Result<T, Box<dyn std::error::Error>>;
 
@@ -55,8 +53,8 @@ struct Lexer {
 }
 
 impl Lexer {
-    fn open(path: &str) -> Res<Self> {
-        let file = File::open(path).map_err(|e| format!("{}: {}", path, e))?;
+    fn open(path: &Path) -> Res<Self> {
+        let file = File::open(path).map_err(|e| format!("{}: {}", path.display(), e))?;
         Ok(Self {
             file,
             buf: vec![0u8; 256 * 1024],
@@ -239,8 +237,8 @@ struct Spool {
 }
 
 impl Spool {
-    fn create(dir: &std::path::Path, name: &str, guard: &mut TmpGuard) -> Res<Self> {
-        let path = guard.track(dir.join(name)).clone();
+    fn create(dir: &Path, name: &str) -> Res<Self> {
+        let path = dir.join(name);
         let writer = BufWriter::new(File::create(&path)?);
         Ok(Self { path, writer })
     }
@@ -354,33 +352,18 @@ struct Shape {
     material: Material,
 }
 
-pub fn convert(opts: &ImportOptions) -> Res<()> {
-    check_header(&opts.file_path)?;
+/// Write `output` and its sibling `.mtl`, spooling index arrays in `tmp_dir`.
+pub fn convert(input: &Path, output: &Path, tmp_dir: &Path, progress: bool) -> Res<()> {
+    check_header(input)?;
 
-    let mut lex = Lexer::open(&opts.file_path)?;
-    let mut guard = TmpGuard::new(opts.keep_tmp);
+    let mut lex = Lexer::open(input)?;
+    let mtl_path = output.with_extension("mtl");
+    let file = File::create(output).map_err(|e| format!("{}: {}", output.display(), e))?;
+    let mut out = BufWriter::with_capacity(256 * 1024, file);
 
-    // The .mtl sits next to the .obj, so it only exists when the OBJ goes to a file.
-    let mtl_path = opts
-        .output
-        .as_ref()
-        .map(|o| PathBuf::from(o).with_extension("mtl"));
-
-    let out: Box<dyn Write> = match &opts.output {
-        Some(p) => Box::new(BufWriter::with_capacity(
-            256 * 1024,
-            File::create(p).map_err(|e| format!("{}: {}", p, e))?,
-        )),
-        None => Box::new(BufWriter::with_capacity(256 * 1024, std::io::stdout())),
-    };
-    let mut out = out;
-
-    writeln!(out, "# Converted from {} by objtools", opts.file_path)?;
-    if let Some(m) = &mtl_path {
-        let name = m.file_name().map(|n| n.to_string_lossy().into_owned());
-        if let Some(name) = name {
-            writeln!(out, "mtllib {}", name)?;
-        }
+    writeln!(out, "# Converted from {} by objtools", input.display())?;
+    if let Some(name) = mtl_path.file_name() {
+        writeln!(out, "mtllib {}", name.to_string_lossy())?;
     }
 
     let mut stack: Vec<Frame> = Vec::new();
@@ -400,7 +383,7 @@ pub fn convert(opts: &ImportOptions) -> Res<()> {
     let mut next_progress: u64 = 100_000_000;
 
     while let Some(tok) = lex.next_token()? {
-        if opts.progress && lex.consumed >= next_progress {
+        if progress && lex.consumed >= next_progress {
             next_progress = lex.consumed + 100_000_000;
             eprintln!("Read {}", fmt_bytes(lex.consumed));
         }
@@ -537,7 +520,7 @@ pub fn convert(opts: &ImportOptions) -> Res<()> {
                 if let Some(Frame::Node(kind)) = stack.pop() {
                     if kind == Node::Shape {
                         if let Some(s) = shape.take() {
-                            finish_shape(s, &mut out, &mut materials, &mut guard, &mut warned)?;
+                            finish_shape(s, &mut out, &mut materials, &mut warned)?;
                         }
                     }
                 }
@@ -558,8 +541,7 @@ pub fn convert(opts: &ImportOptions) -> Res<()> {
                             &mut v_total,
                             &mut vt_total,
                             &mut vn_total,
-                            &opts.tmp_dir,
-                            &mut guard,
+                            tmp_dir,
                             &mut warned,
                         )?;
                     }
@@ -584,44 +566,22 @@ pub fn convert(opts: &ImportOptions) -> Res<()> {
         eprintln!("Warning: no Shape node found — the output contains no geometry.");
     }
 
-    if let Some(path) = &mtl_path {
-        write_mtl(path, &materials)?;
-    } else if !materials.is_empty() {
-        eprintln!(
-            "Note: writing to stdout, so no .mtl was produced. Materials referenced: {}",
-            materials
-                .iter()
-                .map(|m| m.name.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-    }
-
-    eprintln!(
-        "Converted {} shape{}: {} vertices, {} texture coordinates, {} normals",
-        shape_count,
-        if shape_count == 1 { "" } else { "s" },
-        v_total,
-        vt_total,
-        vn_total
-    );
-
-    Ok(())
+    write_mtl(&mtl_path, &materials)
 }
 
-fn check_header(path: &str) -> Res<()> {
-    let mut f = File::open(path).map_err(|e| format!("{}: {}", path, e))?;
+fn check_header(path: &Path) -> Res<()> {
+    let mut f = File::open(path).map_err(|e| format!("{}: {}", path.display(), e))?;
     let mut head = [0u8; 5];
     match f.read(&mut head) {
         Ok(n) if n == 5 && &head == b"#VRML" => Ok(()),
         Ok(_) => {
             eprintln!(
                 "Warning: {} does not start with `#VRML`; parsing it anyway.",
-                path
+                path.display()
             );
             Ok(())
         }
-        Err(e) => Err(format!("{}: {}", path, e).into()),
+        Err(e) => Err(format!("{}: {}", path.display(), e).into()),
     }
 }
 
@@ -694,13 +654,12 @@ fn apply_scalar_field(field: &str, vals: &[String], shape: &mut Option<Shape>) -
 fn read_array(
     kind: Array,
     lex: &mut Lexer,
-    out: &mut Box<dyn Write>,
+    out: &mut impl Write,
     shape: &mut Option<Shape>,
     v_total: &mut u64,
     vt_total: &mut u64,
     vn_total: &mut u64,
-    tmp_dir: &std::path::Path,
-    guard: &mut TmpGuard,
+    tmp_dir: &Path,
     warned: &mut Warned,
 ) -> Res<()> {
     let mut group: Vec<i64> = Vec::with_capacity(3);
@@ -728,7 +687,7 @@ fn read_array(
                     SPOOL_SEQ.fetch_add(1, Ordering::Relaxed),
                     suffix
                 );
-                *slot = Some(Spool::create(tmp_dir, &name, guard)?);
+                *slot = Some(Spool::create(tmp_dir, &name)?);
             }
         }
     }
@@ -774,10 +733,7 @@ fn read_array(
                 Array::Colors => {
                     if !warned.colors {
                         warned.colors = true;
-                        eprintln!(
-                            "Warning: per-vertex colours found; OBJ has no standard way to carry \
-                             them, so they are dropped."
-                        );
+                        eprintln!("Warning: VRML per-vertex colours are omitted.");
                     }
                 }
                 Array::CoordIndex | Array::TexCoordIndex | Array::NormalIndex => {
@@ -828,9 +784,8 @@ fn read_array(
 /// Replay the spooled index arrays in lockstep and write the `f` lines.
 fn finish_shape(
     mut s: Shape,
-    out: &mut Box<dyn Write>,
+    out: &mut impl Write,
     materials: &mut Vec<Material>,
-    guard: &mut TmpGuard,
     warned: &mut Warned,
 ) -> Res<()> {
     if !s.material.is_empty() {
@@ -925,8 +880,9 @@ fn finish_shape(
         writeln!(out)?;
     }
 
+    // Freed shape by shape, so they never pile up; the workspace removes them on error.
     for sp in [&s.coord, &s.texcoord, &s.normal].into_iter().flatten() {
-        guard.release(&sp.path);
+        fs::remove_file(&sp.path)?;
     }
 
     Ok(())
@@ -940,7 +896,7 @@ fn num(raw: &str) -> String {
     }
 }
 
-fn write_mtl(path: &std::path::Path, materials: &[Material]) -> Res<()> {
+fn write_mtl(path: &Path, materials: &[Material]) -> Res<()> {
     let mut f =
         BufWriter::new(File::create(path).map_err(|e| format!("{}: {}", path.display(), e))?);
     writeln!(f, "# Generated by objtools")?;
@@ -999,14 +955,7 @@ mod tests {
         let output = tmp_path("out.obj");
         std::fs::write(&input, src).unwrap();
 
-        convert(&ImportOptions {
-            file_path: input.to_string_lossy().into_owned(),
-            output: Some(output.to_string_lossy().into_owned()),
-            tmp_dir: std::env::temp_dir(),
-            keep_tmp: false,
-            progress: false,
-        })
-        .expect("convert");
+        convert(&input, &output, &std::env::temp_dir(), false).expect("convert");
 
         let s = std::fs::read_to_string(&output).unwrap();
         let _ = std::fs::remove_file(&input);

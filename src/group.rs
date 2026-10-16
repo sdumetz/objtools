@@ -1,7 +1,7 @@
 //! Group the face spool by primitive key, (object, material, UV layout), on disk.
-//! Objects are already contiguous, since every `o` (or `g` before any `o`) starts a new one. Materials can interleave
-//! inside an object; only then is the spool rewritten, by a counting sort into a mapped file.
-//! File order is kept within each key.
+//! Objects are already contiguous, since every `o` (or `g` before any `o`) starts a new one.
+//! Materials can interleave inside an object; only then is the spool rewritten, by a counting
+//! sort into a mapped file. File order is kept within each key.
 use crate::{
     import::Res,
     obj::{self, Scene},

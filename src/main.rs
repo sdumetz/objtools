@@ -10,7 +10,6 @@ mod inspect;
 mod material;
 mod obj;
 mod smooth;
-mod tmp;
 mod triangulate;
 mod vrml;
 

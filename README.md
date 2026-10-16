@@ -9,7 +9,7 @@ objtools import terrain.wrl --center --up-axis z -o terrain.gltf
 objtools inspect terrain.obj
 ```
 
-The CLI has two commands: `import` converts to glTF, and `inspect` reports model statistics. The previous `translate`, `repair` and `split` commands have been removed; VRML-to-OBJ is now an internal adapter.
+The CLI has two commands: `import` converts to glTF, and `inspect` reports model statistics.
 
 ## Usage
 
@@ -25,6 +25,7 @@ objtools import [OPTIONS] <file.obj|file.wrl|file.vrml>
     --convert-images BOOL  auto (default), true or false
     --image-format FORMAT  jpg (default) or png
     --image-quality N      JPEG quality 1..100 (default 95)
+    --no-color     Drop OBJ vertex colors
     --progress     Report reading and conversion progress on stderr
 -h, --help         Show help
 ```
@@ -83,7 +84,7 @@ Each (object, material, UV layout) becomes exactly one primitive, whatever its s
 
 Heap memory for geometry is bounded by one face, plus one small record per key. Grouping needs disk for a second face spool only when materials interleave. Deduplication uses 28 bytes per source position and 24 bytes per seam corner, in sparse files. Missing normals add one face replay pass and a 24-byte-per-source-position disk spool, mapped read-write. Mapped spool pages are file-backed page cache: the kernel keeps them resident while RAM is free and evicts them back to the workspace files under pressure, so they show up in the process's resident size (RSS) and address space without being able to exhaust memory. JSON metadata grows with the number of objects and (object, material) pairs, and is retained in memory. The exporter supports a single object or primitive larger than RAM; it does not promise constant memory for arbitrarily many objects and materials. OBJ statements, including lines joined by a trailing `\`, and VRML tokens are limited to 1 MiB, VRML nesting to 1,024 levels, and polygons to 4,096 corners; oversized records are rejected explicitly.
 
-VRML uses the existing streaming IndexedFaceSet reader to make a temporary OBJ/MTL, then follows the same pipeline. This uses extra disk space and I/O but preserves the fixed-point coordinate path. Allow workspace space for the attribute/face spools, generated binary geometry and (for VRML) intermediate OBJ/MTL. Temporary files are removed on success or error unless `--keep-tmp` is set. The workspace defaults to the output's directory rather than the OS temporary directory, which is often RAM-backed (tmpfs) and would defeat the disk backing; keep `--tmp-dir` on a real disk. Random-access conversion benefits from an SSD once the spools outgrow free RAM. A disk that fills up while the smooth-normal spool is written through its mapping ends the process with a bus error (SIGBUS) instead of an error message.
+VRML is streamed through an IndexedFaceSet reader into a temporary OBJ/MTL, which then follows the same pipeline. This uses extra disk space and I/O but preserves the fixed-point coordinate path. Allow workspace space for the attribute/face spools, generated binary geometry and (for VRML) intermediate OBJ/MTL. Temporary files are removed on success or error unless `--keep-tmp` is set. The workspace defaults to the output's directory rather than the OS temporary directory, which is often RAM-backed (tmpfs) and would defeat the disk backing; keep `--tmp-dir` on a real disk. Random-access conversion benefits from an SSD once the spools outgrow free RAM. A disk that fills up while the smooth-normal spool is written through its mapping ends the process with a bus error (SIGBUS) instead of an error message.
 
 ## Materials: Phong to PBR
 
@@ -141,7 +142,7 @@ objtools import mesh.obj --convert-images true --image-format png
 
 ## Geometry coverage and limitations
 
-OBJ objects become named meshes/nodes. Each material used by an object is one primitive, and faces with and without UVs in the same material are two. Every primitive owns its buffer views; no vertex buffer is shared between meshes. A future glTF-side `split` can copy the referenced ranges and remap accessors, buffer views, materials and textures without reparsing source geometry. Empty objects are omitted. Many exporters write groups (`g`) and no objects, so until a file's first `o` each `g` starts an object named after the group; groups inside objects are not represented. A repeated `o` or `g` name starts a new object rather than reopening the earlier one, as in obj2gltf, which also maps groups to meshes.
+OBJ objects become named meshes/nodes. Each material used by an object is one primitive, and faces with and without UVs in the same material are two. Every primitive owns its buffer views; no vertex buffer is shared between meshes. Empty objects are omitted. Many exporters write groups (`g`) and no objects, so until a file's first `o` each `g` starts an object named after the group; groups inside objects are not represented. A repeated `o` or `g` name starts a new object rather than reopening the earlier one, as in obj2gltf, which also maps groups to meshes.
 
 Valid source normals are preserved and normalized. Zero-length source normals are repaired with generated smooth normals and reported. Missing normals default to smooth shading: triangle normals are accumulated with area weights by source position index in a disk-backed spool, then normalized. Smoothing groups only switch flat shading, as in three.js: faces after `s off` or `s 0` get their own face normal, are not shared with other faces, and do not weigh on their neighbours' smooth normals. A group number or a bare `s` smooths faces together again; different numbers are not kept apart, as in three.js and Blender, so no hard edges appear between groups. Files without `s`, such as most scans, stay smooth (Blender would shade them flat). VRML crease angles do not disable the smooth default. Smoothing crosses material and UV boundaries for shared position indices; separate position indices are not welded. Opposing faces whose accumulated normals cancel fall back to their polygon normal; such corners are never shared, since each carries its own face's normal. Faces mixing present and missing UVs/normals are rejected. OBJ and MTL keywords match whatever their case, as in obj2gltf and three.js. A trailing `\` continues any OBJ statement on the next line, as in Blender. Comments are stripped first, so a comment line never continues. Unsupported OBJ records warn and are omitted. A face with fewer than three corners is really a line or a point, so it is omitted the same way and counted on stderr, after its indices are checked.
 

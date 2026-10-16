@@ -1,7 +1,7 @@
 # Build output
 /target
 
-# Local scratch output from `objtools split`
+# Local scratch output
 /out
 
 # Large sample meshes and their assets are kept out of the repository
