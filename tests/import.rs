@@ -413,10 +413,10 @@ fn texture_error_cleans_previously_copied_files() {
 }
 
 #[test]
-fn smooth_normals_ignore_s_off_and_cross_material_and_uv_seams() {
+fn smooth_normals_cross_material_and_uv_seams() {
     let f = Fixture::new();
     f.file("in.mtl", "newmtl first\nnewmtl second\n");
-    f.file("in.obj", "mtllib in.mtl\ns off\nv 0 0 0\nv 1 0 0\nv 0 1 0\nv 0 0 2\nvt 0 0\nvt .5 .5\nusemtl first\nf 1/1 2/1 3/1\nusemtl second\nf 1/2 4/2 2/2\n");
+    f.file("in.obj", "mtllib in.mtl\ns 1\nv 0 0 0\nv 1 0 0\nv 0 1 0\nv 0 0 2\nvt 0 0\nvt .5 .5\nusemtl first\nf 1/1 2/1 3/1\nusemtl second\nf 1/2 4/2 2/2\n");
     let result = f.import("in.obj", false);
     assert!(
         result.status.success(),
@@ -438,6 +438,37 @@ fn smooth_normals_ignore_s_off_and_cross_material_and_uv_seams() {
         assert!(shared[0].abs() < 1e-6);
         assert!((shared[1] - 2. / 5f32.sqrt()).abs() < 1e-6);
         assert!((shared[2] - 1. / 5f32.sqrt()).abs() < 1e-6);
+    }
+}
+
+#[test]
+fn s_off_faces_are_flat_and_weigh_on_no_neighbour() {
+    // Face 1 faces +z, face 2 faces +y; they share positions 1 and 2.
+    for flat in ["s off", "s 0", "s OFF"] {
+        let f = Fixture::new();
+        f.file(
+            "in.obj",
+            &format!("v 0 0 0\nv 1 0 0\nv 0 1 0\nv 0 0 2\n{flat}\nf 1 2 3\ns 1\nf 1 4 2\n"),
+        );
+        let result = f.import("in.obj", false);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let (root, bin) = f.result();
+        let p = &root["meshes"][0]["primitives"][0];
+        let normals = floats(
+            &root,
+            &bin,
+            p["attributes"]["NORMAL"].as_u64().unwrap() as usize,
+            3,
+        );
+        // The flat face keeps its own corners; the smooth one is smoothed only with itself.
+        assert_eq!(normals.len(), 6, "{flat}");
+        let up = normals.iter().filter(|n| **n == vec![0., 0., 1.]).count();
+        let side = normals.iter().filter(|n| **n == vec![0., 1., 0.]).count();
+        assert_eq!((up, side), (3, 3), "{flat}: {normals:?}");
     }
 }
 

@@ -28,7 +28,13 @@ pub fn group(scene: &Scene, dir: &Path, progress: bool) -> Res<Vec<Group>> {
     let mut interleaved = false;
     let mut count = 0u64;
     let mut untextured = 0u64;
-    while let Some((object, material, corners)) = obj::read_face(&mut faces)? {
+    while let Some(obj::Face {
+        object,
+        material,
+        corners,
+        ..
+    }) = obj::read_face(&mut faces)?
+    {
         count += 1;
         let uv = corners[0].vt != 0;
         let normal = corners[0].vn != 0;
@@ -80,10 +86,16 @@ pub fn group(scene: &Scene, dir: &Path, progress: bool) -> Res<Vec<Group>> {
     }
     let mut faces = BufReader::with_capacity(256 * 1024, File::open(&path)?);
     let mut record = Vec::new();
-    while let Some((object, material, corners)) = obj::read_face(&mut faces)? {
+    while let Some(obj::Face {
+        object,
+        material,
+        flat,
+        corners,
+    }) = obj::read_face(&mut faces)?
+    {
         let id = keys[&(object, material, corners[0].vt != 0)];
         record.clear();
-        obj::encode_face(&mut record, object, material, &corners);
+        obj::encode_face(&mut record, object, material, flat, &corners);
         sorted[cursors[id]..cursors[id] + record.len()].copy_from_slice(&record);
         cursors[id] += record.len();
     }

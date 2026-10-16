@@ -263,7 +263,13 @@ fn write_with_limit(
     let mut repaired_normals = 0u64;
     let mut splits = 0u64;
     let mut local = Vec::new();
-    while let Some((object, material, corners)) = obj::read_face(&mut faces)? {
+    while let Some(obj::Face {
+        object,
+        material,
+        flat,
+        corners,
+    }) = obj::read_face(&mut faces)?
+    {
         face_count += 1;
         // Faces were validated by grouping: UV and normal presence is uniform per face.
         let uv = corners[0].vt != 0;
@@ -340,21 +346,26 @@ fn write_with_limit(
             continue;
         };
         forced_polygons += u64::from(polygon.forced);
-        let flat = polygon.normal;
-        // A corner falling back to its face's flat normal has a normal of its own: never shared.
+        let face_normal = polygon.normal;
+        // A corner taking its face's normal, under `s off` or where the smooth normal cancels
+        // out, has a normal of its own: never shared.
         let mut own = vec![false; corners.len()];
         for ((corner, v), own) in corners.iter().zip(&mut vertices).zip(&mut own) {
             if v[3..6].iter().any(|n| *n != 0.) {
                 continue;
             }
-            let sum = obj::fetch::<3>(smooth.as_ref().unwrap(), corner.v, scene.counts[0])?
-                .map(f64::from_le_bytes);
+            let sum = if flat {
+                [0.; 3]
+            } else {
+                obj::fetch::<3>(smooth.as_ref().unwrap(), corner.v, scene.counts[0])?
+                    .map(f64::from_le_bytes)
+            };
             let length = sum.iter().map(|x| x * x).sum::<f64>().sqrt();
             let normal = if length > 0. && length.is_finite() {
                 sum.map(|x| (x / length) as f32)
             } else {
                 *own = true;
-                flat
+                face_normal
             };
             v[3..6].copy_from_slice(&normal);
         }

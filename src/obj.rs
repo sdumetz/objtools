@@ -124,6 +124,7 @@ pub fn spool(
     let mut names = HashMap::from([("default".to_owned(), 0u32)]);
     let mut object = 0u32;
     let mut seen_object = false;
+    let mut flat = false;
     let mut material = 0u32;
     let mut warned = HashSet::new();
     let mut short_faces = 0u64;
@@ -324,7 +325,13 @@ pub fn spool(
                     }
                     scene.missing_normals |= corners.iter().any(|c| c.vn == 0);
                     record.clear();
-                    encode_face(&mut record, object as usize, material as usize, &corners);
+                    encode_face(
+                        &mut record,
+                        object as usize,
+                        material as usize,
+                        flat,
+                        &corners,
+                    );
                     faces.write_all(&record)?;
                 }
                 // Many exporters write only groups. Until an `o` shows the file names its
@@ -339,7 +346,11 @@ pub fn spool(
                         rest.into()
                     });
                 }
-                "" | "s" | "g" => {}
+                // Smoothing groups only switch flat shading, as in three.js: `s off` or `s 0` makes
+                // the faces that follow flat where the file gives no normals, and any group
+                // number, or a bare `s`, smooths them together again.
+                "s" => flat = rest.eq_ignore_ascii_case("off") || rest.parse::<u64>() == Ok(0),
+                "" | "g" => {}
                 _ => {
                     if warned.insert(key.to_owned()) {
                         eprintln!("Warning: unsupported OBJ record {written} is omitted");
@@ -374,10 +385,28 @@ pub fn spool(
     }
     Ok(scene)
 }
-/// Append one face spool record: object, material and corner count, then `(v, vt, vn)` per corner.
-pub fn encode_face(out: &mut Vec<u8>, object: usize, material: usize, corners: &[Corner]) {
-    for n in [object, material, corners.len()] {
-        out.extend_from_slice(&(n as u32).to_le_bytes());
+/// One face spool record.
+pub struct Face {
+    pub object: usize,
+    pub material: usize,
+    /// Under `s off`: shaded flat where the file gives no normals.
+    pub flat: bool,
+    pub corners: Vec<Corner>,
+}
+/// Set in the corner count, which never comes near it, for a flat face.
+const FLAT: u32 = 1 << 31;
+/// Append one face spool record: object, material and corner count (with the flat flag), then
+/// `(v, vt, vn)` per corner.
+pub fn encode_face(
+    out: &mut Vec<u8>,
+    object: usize,
+    material: usize,
+    flat: bool,
+    corners: &[Corner],
+) {
+    let count = corners.len() as u32 | if flat { FLAT } else { 0 };
+    for n in [object as u32, material as u32, count] {
+        out.extend_from_slice(&n.to_le_bytes());
     }
     for c in corners {
         for n in [c.v, c.vt, c.vn] {
@@ -385,7 +414,7 @@ pub fn encode_face(out: &mut Vec<u8>, object: usize, material: usize, corners: &
         }
     }
 }
-pub fn read_face(reader: &mut impl Read) -> Res<Option<(usize, usize, Vec<Corner>)>> {
+pub fn read_face(reader: &mut impl Read) -> Res<Option<Face>> {
     let mut first = [0; 4];
     if reader.read(&mut first[..1])? == 0 {
         return Ok(None);
@@ -395,7 +424,9 @@ pub fn read_face(reader: &mut impl Read) -> Res<Option<(usize, usize, Vec<Corner
     reader.read_exact(&mut first)?;
     let material = u32::from_le_bytes(first) as usize;
     reader.read_exact(&mut first)?;
-    let n = u32::from_le_bytes(first) as usize;
+    let count = u32::from_le_bytes(first);
+    let flat = count & FLAT != 0;
+    let n = (count & !FLAT) as usize;
     if !(3..=MAX_FACE).contains(&n) {
         return Err("Invalid face spool".into());
     }
@@ -413,7 +444,12 @@ pub fn read_face(reader: &mut impl Read) -> Res<Option<(usize, usize, Vec<Corner
             vn: a[2],
         });
     }
-    Ok(Some((object, material, corners)))
+    Ok(Some(Face {
+        object,
+        material,
+        flat,
+        corners,
+    }))
 }
 /// Map a finished spool read-only. Its pages are file-backed page cache: they stay resident
 /// while RAM is free and are evicted, not swapped, under memory pressure.

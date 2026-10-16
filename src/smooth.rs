@@ -28,8 +28,12 @@ pub fn generate(scene: &Scene, positions: &[u8], dir: &Path, progress: bool) -> 
     let mut sums = unsafe { MmapMut::map_mut(&file)? };
     let mut faces = BufReader::new(File::open(dir.join("faces"))?);
     let mut count = 0u64;
-    while let Some((_, _, corners)) = obj::read_face(&mut faces)? {
+    while let Some(obj::Face { flat, corners, .. }) = obj::read_face(&mut faces)? {
         count += 1;
+        // A face under `s off` belongs to no smoothing group, so it weighs on no neighbour.
+        if flat {
+            continue;
+        }
         let anchor =
             obj::fetch::<3>(positions, corners[0].v, scene.counts[0])?.map(i64::from_le_bytes);
         let mut points = Vec::with_capacity(corners.len());
