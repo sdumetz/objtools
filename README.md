@@ -3,8 +3,7 @@
 A Rust command-line tool for converting very large OBJ and VRML meshes to glTF 2.0 and inspecting model statistics. It handles georeferenced coordinates and models larger than available RAM, using a disk workspace.
 
 ## Install
-
-Install from a checkout with [Rust and Cargo](https://www.rust-lang.org/tools/install):
+Download a binary from latest [release](https://github.com/sdumetz/objtools/releases) or install from a repository checkout with [Rust and Cargo](https://www.rust-lang.org/tools/install):
 
 ```sh
 cargo install --path . --locked
@@ -18,20 +17,24 @@ objtools import terrain.obj --center -o terrain.gltf
 objtools import terrain.wrl --center --up-axis z -o terrain.gltf
 ```
 
-An import writes a `.gltf` file, a sibling `.bin` geometry buffer and any copied or converted textures. By default, the output uses the input's name with a `.gltf` extension. The destination directory must already exist; existing output files are never overwritten.
+An import writes a `.gltf` file, a sibling `.bin` geometry buffer and any copied or converted textures. By default, the output uses the input's name with a `.gltf` extension. The destination directory must already exist; existing output files are never overwritten. A failed import removes only output files it created.
 
-Common options:
+```text
+objtools import [OPTIONS] <file.obj|file.wrl|file.vrml>
 
-| Option | Purpose |
-| --- | --- |
-| `-o, --output FILE` | Choose the destination `.gltf` file |
-| `--center` | Recenter the model; recommended for georeferenced coordinates |
-| `--up-axis z` | Convert Z-up input to glTF's Y-up convention; default input is Y-up |
-| `--tmp-dir DIR` | Choose a workspace on a disk with enough free space |
-| `--images copy` | Copy textures alongside the output for sharing |
-| `--convert-images true` | Convert all textures; defaults to JPEG at quality 95 |
-| `--image-format png` | Use lossless PNG when converting, preserving transparency |
-| `--progress` | Show reading and conversion progress |
+-o, --output FILE  Destination .gltf (default: input with .gltf extension)
+    --center       Subtract the whole-input bounding-box center
+    --up-axis AXIS Source up axis: y (default) or z
+    --tmp-dir DIR  Workspace directory (default: the output's directory)
+    --keep-tmp     Preserve the workspace for debugging
+    --images MODE  auto (default), keep or copy
+    --convert-images BOOL  auto (default), true or false
+    --image-format FORMAT  jpg (default) or png
+    --image-quality N      JPEG quality 1..100 (default 95)
+    --no-color     Drop OBJ vertex colors
+    --progress     Report reading and conversion progress on stderr
+-h, --help         Show help
+```
 
 Textures stay in place when input and output share a folder and no conversion is needed; otherwise they are copied. JPG and PNG are kept without conversion by default; other supported formats are converted. Source images are never modified.
 
@@ -39,10 +42,21 @@ Use `--convert-images true --image-format png` to preserve alpha when converting
 
 ## Inspect a model
 
+```text
+objtools inspect [OPTIONS] <file.gltf|file.obj|file.wrl|file.vrml>
+
+    --tmp-dir DIR  Workspace for the import and coverage maps (default: the input's directory)
+    --keep-tmp     Preserve the workspace for debugging
+    --progress     Report progress on stderr
+-h, --help         Show help
+```
+
 ```sh
 objtools inspect model.obj
 objtools inspect terrain.gltf --progress
 ```
+
+example output:
 
 ```text
 Vertices:           2.25M
@@ -54,7 +68,18 @@ Texture                                        Size  Occupancy
 Arc_de_Triomphe_FULL_u1_v1_diffuse.png  16384x16384  0.018
 ```
 
-`inspect` reports the converted vertex and triangle counts, base-color texture sizes and the fraction of texture texels used by the model. OBJ and VRML inputs are converted temporarily before measuring. It accepts `.gltf` files with external buffers and images; `.glb`, embedded data and sparse accessors are unsupported.
+OBJ and VRML inputs are first converted in a private workspace, then measured and cleaned up. The figures match those of the imported glTF; textures are referenced without conversion and import warnings still reach stderr.
+
+| Statistic | Meaning |
+| --- | --- |
+| Vertices | glTF vertices, including the separate vertices required at UV/normal seams and material boundaries. Each mesh and shared position accessor counts once. |
+| Faces | Triangles after triangulation, excluding skipped degenerate faces. Triangle strips and fans count `n − 2`; points and lines count none. |
+| Diffuse texels | Width × height of each image used as a base-color texture, counting each image once. |
+| Texture occupancy | Fraction of base-level texture texels sampled by the model, counting overlaps once and accounting for texture filtering, transforms and wrapping. Reported globally and per image. |
+
+Large figures use SI multipliers (k, M, G, T) with three significant digits. Occupancy excludes lower mipmap levels. Triangles repeating a texture more than 64 times vertically are omitted from occupancy with a warning. The wiki explains the [coverage calculation](https://github.com/sdumetz/objtools/wiki/Texture-occupancy).
+
+Supported glTF inputs use external buffers and images, indexed or non-indexed triangles, strips or fans, float or normalized integer UVs, and the texture's selected `TEXCOORD_n`. Embedded `data:` URIs, `.glb` and sparse accessors are rejected.
 
 ## Working with large or georeferenced models
 
@@ -65,12 +90,9 @@ Arc_de_Triomphe_FULL_u1_v1_diffuse.png  16384x16384  0.018
 
 ## Documentation
 
-Run `objtools import --help` or `objtools inspect --help` for all options.
+Run `objtools import --help` or `objtools inspect --help` for command help.
 
-The [GitHub wiki](https://github.com/sdumetz/objtools/wiki) contains the detailed documentation:
+The [Wiki](https://github.com/sdumetz/objtools/wiki) covers:
 
-- [Command reference](https://github.com/sdumetz/objtools/wiki/Command-reference) and [image options](https://github.com/sdumetz/objtools/wiki/Images)
-- [Inspection statistics and texture occupancy](https://github.com/sdumetz/objtools/wiki/Inspect)
-- [Georeferenced coordinates](https://github.com/sdumetz/objtools/wiki/Georeferenced-coordinates)
-- [Materials](https://github.com/sdumetz/objtools/wiki/Materials) and [geometry and format support](https://github.com/sdumetz/objtools/wiki/Geometry-and-format-support)
-- [Conversion internals](https://github.com/sdumetz/objtools/wiki/Disk-backed-conversion) and [development](https://github.com/sdumetz/objtools/wiki/Development)
+- [Conversion](https://github.com/sdumetz/objtools/wiki/Conversion): supported formats, georeferencing, image formats and material approximations.
+- [How it works](https://github.com/sdumetz/objtools/wiki/How-it-works): the streaming pipeline, heap and memory-mapped files, disk requirements and texture coverage calculations.

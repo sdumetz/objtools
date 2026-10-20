@@ -5,7 +5,7 @@
 - `import` converts OBJ or VRML into glTF 2.0 JSON with an external `.bin`, and keeps, copies or converts the textures.
 - `inspect` reports vertex, face, diffuse-texel and texture-occupancy statistics. It reads glTF, and imports OBJ or VRML into a private workspace first.
 
-The README covers everyday usage; the GitHub wiki contains the detailed documentation. Its sources are maintained in the separate `git@github.com:sdumetz/objtools.wiki.git` repository, not in this repository. Keep both in sync with user-visible changes at the appropriate level of detail.
+The README contains the command reference and inspection statistics. The GitHub wiki has two sections: Conversion (format support, georeferencing, images and material approximations) and How it works (streaming, heap/mmap/disk use and inspection algorithms). Its sources are maintained in the separate `git@github.com:sdumetz/objtools.wiki.git` repository, not in this repository. Keep both in sync with user-visible changes at the appropriate level of detail.
 
 # Constraints
 
@@ -18,7 +18,7 @@ The README covers everyday usage; the GitHub wiki contains the detailed document
 # Conventions
 
 - Comments and docs describe current behaviour and the reasons for it. They don't describe development history or removed features.
-- Every behaviour change comes with tests and a documentation update. Update the README for everyday usage changes and the relevant GitHub wiki pages for detailed behaviour.
+- Every behaviour change comes with tests and a documentation update. Update the README for command options and inspection results, the Conversion wiki section for conversion behaviour, and How it works for implementation details.
 - Before committing, run:
 
   ```sh
