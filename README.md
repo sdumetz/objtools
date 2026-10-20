@@ -1,6 +1,6 @@
 # objtools
 
-A Rust command-line tool for converting very large OBJ and VRML meshes to glTF 2.0 and inspecting model statistics. It handles georeferenced coordinates and models larger than available RAM, using a disk workspace.
+A Rust command-line tool for converting very large OBJ and VRML meshes to glTF 2.0 and inspecting model statistics. It handles georeferenced coordinates and models [larger than available RAM](https://github.com/sdumetz/objtools/wiki/Resource-usage-comparison), using a disk workspace.
 
 ## Install
 Download a binary from latest [release](https://github.com/sdumetz/objtools/releases) or install from a repository checkout with [Rust and Cargo](https://www.rust-lang.org/tools/install):
