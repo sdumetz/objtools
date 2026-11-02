@@ -1,11 +1,11 @@
 //! Bounded primitive assembly, independent of whole-object vertex/face counts.
-use crate::{
+use super::{
     dedup::Dedup,
     fixed::{format_triple, SCALE},
-    import::Res,
     obj::{self, Scene},
     triangulate,
 };
+use crate::shared::{disk::map, Res};
 use serde_json::{json, Value};
 use std::{
     collections::{BTreeSet, HashMap},
@@ -185,30 +185,30 @@ fn create(path: &Path, outputs: &mut Outputs) -> Res<File> {
     Ok(f)
 }
 
-pub fn write(scene: Scene, dir: &Path, options: &crate::import::Options) -> Res<()> {
+pub fn write(scene: Scene, dir: &Path, options: &super::Options) -> Res<()> {
     write_with_limit(scene, dir, options, MAX_VERTICES)
 }
 /// `max_vertices` is only lowered by tests, to exercise splitting at the u32 index limit.
 fn write_with_limit(
     scene: Scene,
     dir: &Path,
-    options: &crate::import::Options,
+    options: &super::Options,
     max_vertices: u64,
 ) -> Res<()> {
     // Validates faces before any image conversion or geometry work.
-    let groups = crate::group::group(&scene, dir, options.progress)?;
+    let groups = super::group::group(&scene, dir, options.progress)?;
     let output = &options.output;
     let center = options.center;
     let z_up = options.z_up;
     let progress = options.progress;
-    let image_plans = crate::images::prepare(
+    let image_plans = super::images::prepare(
         &options.images,
         &options.input,
         output,
         dir,
         &scene.materials,
     )?;
-    let transparency = crate::images::scan_transparency(&image_plans);
+    let transparency = super::images::scan_transparency(&image_plans);
     let origin = if center {
         scene.bbox.center().ok_or("No vertices to center")?
     } else {
@@ -224,17 +224,17 @@ fn write_with_limit(
         );
     }
     let attrs = [
-        obj::map(&dir.join("v"))?,
-        obj::map(&dir.join("vt"))?,
-        obj::map(&dir.join("vn"))?,
+        map(&dir.join("v"))?,
+        map(&dir.join("vt"))?,
+        map(&dir.join("vn"))?,
     ];
     let colors = if scene.colors {
-        Some(obj::map(&dir.join("vc"))?)
+        Some(map(&dir.join("vc"))?)
     } else {
         None
     };
     let smooth = if scene.missing_normals {
-        Some(crate::smooth::generate(&scene, &attrs[0], dir, progress)?)
+        Some(super::smooth::generate(&scene, &attrs[0], dir, progress)?)
     } else {
         None
     };
@@ -547,7 +547,7 @@ fn write_with_limit(
         }
     }
     let bin_path = output.with_extension("bin");
-    let origin_strings = origin.map(crate::fixed::format_fixed_as_decimal);
+    let origin_strings = origin.map(super::fixed::format_fixed_as_decimal);
     let mut root = json!({"asset":{"version":"2.0","generator":concat!("objtools ",env!("CARGO_PKG_VERSION"))},
         "scene":0,"scenes":[{"nodes":(0..nodes.len()).collect::<Vec<_>>()}],"nodes":nodes,"meshes":meshes,
         "buffers":[{"uri":uri(&bin_path.file_name().unwrap().to_string_lossy()),"byteLength":document.offset}],

@@ -1,10 +1,10 @@
 //! Area-weighted normal accumulation by source position index, backed by a mapped disk spool.
-use crate::{
+use super::{
     fixed::SCALE,
-    import::Res,
     obj::{self, Scene},
     triangulate,
 };
+use crate::shared::Res;
 use memmap2::MmapMut;
 use std::{
     fs::{File, OpenOptions},

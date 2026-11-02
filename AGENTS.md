@@ -15,6 +15,13 @@ The README contains the command reference and inspection statistics. The GitHub 
 - **Real exports are messy.** Prefer omitting unsupported data with one counted warning over aborting a long import. Reserve errors for input that can't be interpreted, or that would silently give wrong geometry.
 - **Interop choices are credited.** When behaviour follows another implementation (three.js, Blender, earcut, obj2gltf, a spec), name it in the code comment or relevant wiki page. That way the choice can be traced, and later swapped.
 
+# Code layout
+
+- `src/main.rs` dispatches to the commands.
+- `src/import/` converts OBJ and VRML to glTF. `src/inspect/` measures a glTF and reports its statistics, using `import::run` for other inputs.
+- In each command, `cli.rs` parses arguments and prints help, and `mod.rs` holds `Options` and `run`.
+- `src/shared/` holds what more than one command uses: `Res`, workspaces and file mappings, and number formatting. Code used by one command stays in that command's directory.
+
 # Conventions
 
 - Comments and docs describe current behaviour and the reasons for it. They don't describe development history or removed features.

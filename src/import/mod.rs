@@ -1,11 +1,18 @@
 //! Import orchestration. Geometry lives on disk, never in a whole-model structure.
-use std::{
-    fs,
-    path::PathBuf,
-    sync::atomic::{AtomicU64, Ordering},
-};
-pub type Res<T> = Result<T, Box<dyn std::error::Error>>;
-static SEQ: AtomicU64 = AtomicU64::new(0);
+pub mod cli;
+mod dedup;
+mod fixed;
+mod gltf;
+mod group;
+pub mod images;
+mod material;
+mod obj;
+mod smooth;
+mod triangulate;
+mod vrml;
+
+use crate::shared::{disk::Workspace, Res};
+use std::path::PathBuf;
 pub struct Options {
     pub input: PathBuf,
     pub output: PathBuf,
@@ -14,36 +21,11 @@ pub struct Options {
     pub z_up: bool,
     pub progress: bool,
     pub keep_tmp: bool,
-    pub images: crate::images::Options,
+    pub images: images::Options,
     /// Only warnings reach stderr; `inspect` imports into a workspace nobody will look at.
     pub quiet: bool,
     /// Drop OBJ vertex colours instead of writing `COLOR_0`/`_COLOR`.
     pub no_color: bool,
-}
-/// A private directory removed on drop, including when a command bails out early.
-pub struct Workspace {
-    pub path: PathBuf,
-    keep: bool,
-}
-impl Workspace {
-    pub fn create(tmp_dir: &std::path::Path, keep: bool) -> Res<Self> {
-        let path = tmp_dir.join(format!(
-            "objtools-{}-{}",
-            std::process::id(),
-            SEQ.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir(&path)?;
-        Ok(Self { path, keep })
-    }
-}
-impl Drop for Workspace {
-    fn drop(&mut self) {
-        if self.keep {
-            eprintln!("Kept workspace: {}", self.path.display());
-        } else {
-            let _ = fs::remove_dir_all(&self.path);
-        }
-    }
 }
 pub fn run(opts: Options) -> Res<()> {
     let ext = opts
@@ -66,14 +48,14 @@ pub fn run(opts: Options) -> Res<()> {
         opts.input.clone()
     } else {
         let intermediate = workspace.path.join("source.obj");
-        crate::vrml::convert(&opts.input, &intermediate, &workspace.path, opts.progress)?;
+        vrml::convert(&opts.input, &intermediate, &workspace.path, opts.progress)?;
         intermediate
     };
     let texture_base = opts
         .input
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."));
-    let scene = crate::obj::spool(
+    let scene = obj::spool(
         &source,
         &workspace.path,
         opts.progress,
@@ -84,5 +66,5 @@ pub fn run(opts: Options) -> Res<()> {
         },
         !opts.no_color,
     )?;
-    crate::gltf::write(scene, &workspace.path, &opts)
+    gltf::write(scene, &workspace.path, &opts)
 }

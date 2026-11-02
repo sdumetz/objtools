@@ -2,7 +2,8 @@
 //! primitive size never costs heap. A table indexed by source position holds the first
 //! `(vt, vn)` seen for it; further combinations at that position (UV or normal seams) go to
 //! overflow records chained from the table entry.
-use crate::{import::Res, obj::Corner};
+use super::obj::Corner;
+use crate::shared::Res;
 use memmap2::MmapMut;
 use std::{fs::OpenOptions, path::Path};
 /// generation u32, output index u32, chain head u32 (record + 1, 0 = none), vt u64, vn u64.

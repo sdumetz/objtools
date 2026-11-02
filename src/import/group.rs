@@ -2,10 +2,8 @@
 //! Objects are already contiguous, since every `o` (or `g` before any `o`) starts a new one.
 //! Materials can interleave inside an object; only then is the spool rewritten, by a counting
 //! sort into a mapped file. File order is kept within each key.
-use crate::{
-    import::Res,
-    obj::{self, Scene},
-};
+use super::obj::{self, Scene};
+use crate::shared::Res;
 use memmap2::MmapMut;
 use std::{
     collections::HashMap,

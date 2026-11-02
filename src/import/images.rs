@@ -1,5 +1,6 @@
 //! Source image policy and optional decoding/encoding, one image at a time.
-use crate::{import::Res, material::Material};
+use super::material::Material;
+use crate::shared::Res;
 use std::{
     collections::{HashMap, HashSet},
     fs::{self, File},
@@ -96,7 +97,7 @@ fn relative_uri(source: &Path, destination: &Path) -> Res<String> {
     let mut parts = vec!["..".to_owned(); from.len() - common];
     for component in &to[common..] {
         if let Component::Normal(name) = component {
-            parts.push(crate::gltf::uri(&name.to_string_lossy()));
+            parts.push(super::gltf::uri(&name.to_string_lossy()));
         }
     }
     Ok(parts.join("/"))
@@ -166,7 +167,7 @@ pub fn prepare(
         };
         check_image(&content).map_err(|e| format!("Texture {}: {e}", source.display()))?;
         let uri = if copy {
-            crate::gltf::uri(&name)
+            super::gltf::uri(&name)
         } else {
             relative_uri(&source, &destination)?
         };

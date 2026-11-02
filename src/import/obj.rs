@@ -1,12 +1,11 @@
 //! OBJ decoding to random-access attribute spools and a sequential face spool.
 //! Vertex components glTF cannot carry are dropped with one warning per kind, never an error.
 //! Spools are written sequentially, then memory-mapped for the random-access replay.
-use crate::{
+use super::{
     fixed::{parse_three_fixed, BBox},
-    import::Res,
     material::{self, Material},
 };
-use memmap2::Mmap;
+use crate::shared::Res;
 use std::{
     collections::{HashMap, HashSet},
     fs::File,
@@ -155,7 +154,10 @@ pub fn spool(
             line_no += 1;
         }
         if progress && bytes >= next_progress {
-            eprintln!("Spooling OBJ: {}", crate::format::fmt_bytes(bytes as u64));
+            eprintln!(
+                "Spooling OBJ: {}",
+                crate::shared::format::fmt_bytes(bytes as u64)
+            );
             next_progress = bytes + 100_000_000;
         }
         let stripped = line.split('#').next().unwrap().trim();
@@ -450,13 +452,6 @@ pub fn read_face(reader: &mut impl Read) -> Res<Option<Face>> {
         flat,
         corners,
     }))
-}
-/// Map a finished spool read-only. Its pages are file-backed page cache: they stay resident
-/// while RAM is free and are evicted, not swapped, under memory pressure.
-pub fn map(path: &Path) -> Res<Mmap> {
-    // SAFETY: spools live in the private workspace and are complete before being mapped;
-    // nothing truncates or rewrites them while the mapping is alive.
-    Ok(unsafe { Mmap::map(&File::open(path)?)? })
 }
 pub fn fetch<const N: usize>(spool: &[u8], index: u64, count: u64) -> Res<[[u8; 8]; N]> {
     if index == 0 || index > count {

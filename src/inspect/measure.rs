@@ -1,11 +1,11 @@
-//! Model statistics, read from glTF. OBJ and VRML are first imported into a private workspace,
-//! so every input reports exactly what `objtools import` would produce. Buffers are mapped, and
-//! texel coverage lives in mapped workspace files: nothing whole-model is held on the heap.
-use crate::{
+//! Statistics read from a glTF. Buffers are mapped, and texel coverage lives in mapped workspace
+//! files: nothing whole-model is held on the heap.
+use super::{
     coverage::{Coverage, Filter, Wrap},
-    format::fmt_count,
-    import::{Res, Workspace},
+    parent,
+    report::report,
 };
+use crate::shared::{disk::map, format::fmt_count, Res};
 use memmap2::Mmap;
 use serde_json::Value;
 use std::{
@@ -14,67 +14,11 @@ use std::{
     io::{BufReader, Cursor},
     path::{Component, Path, PathBuf},
 };
-pub struct Options {
-    pub input: PathBuf,
-    pub tmp_dir: Option<PathBuf>,
-    pub keep_tmp: bool,
-    pub progress: bool,
-}
 struct Texture {
     name: String,
     width: u32,
     height: u32,
     coverage: Coverage,
-}
-fn parent(path: &Path) -> &Path {
-    path.parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."))
-}
-pub fn run(opts: Options) -> Res<()> {
-    let ext = opts
-        .input
-        .extension()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    if !matches!(ext.as_str(), "gltf" | "obj" | "wrl" | "vrml") {
-        return Err(format!("Unsupported input format: .{ext}").into());
-    }
-    if !opts.input.is_file() {
-        return Err(format!("{}: no such file", opts.input.display()).into());
-    }
-    // Like import's, this workspace defaults to a real disk rather than a RAM-backed /tmp.
-    let tmp_dir = opts
-        .tmp_dir
-        .unwrap_or_else(|| parent(&opts.input).to_owned());
-    let workspace = Workspace::create(&tmp_dir, opts.keep_tmp)?;
-    let gltf = if ext == "gltf" {
-        opts.input.clone()
-    } else {
-        let output = workspace.path.join("model.gltf");
-        crate::import::run(crate::import::Options {
-            input: opts.input.clone(),
-            output: output.clone(),
-            tmp_dir: workspace.path.clone(),
-            center: false,
-            z_up: false,
-            progress: opts.progress,
-            keep_tmp: opts.keep_tmp,
-            images: crate::images::Options {
-                mode: crate::images::Mode::Reference,
-                ..Default::default()
-            },
-            quiet: true,
-            // Colours change neither the vertices nor the texels counted.
-            no_color: true,
-        })?;
-        output
-    };
-    let display_base = fs::canonicalize(parent(&opts.input))?;
-    let report = inspect(&gltf, &display_base, &workspace.path, opts.progress)?;
-    print!("{report}");
-    Ok(())
 }
 /// Undo URI path escaping; `gltf::uri` writes `%XX` for every byte outside the unreserved set.
 fn decode_uri(uri: &str) -> Res<PathBuf> {
@@ -277,7 +221,7 @@ fn dimensions(
 }
 /// Each mesh is counted once, however many nodes instance it, and a POSITION accessor shared
 /// by several primitives counts its vertices once.
-fn inspect(path: &Path, display_base: &Path, workspace: &Path, progress: bool) -> Res<String> {
+pub fn measure(path: &Path, display_base: &Path, workspace: &Path, progress: bool) -> Res<String> {
     let root: Value = serde_json::from_reader(BufReader::new(File::open(path)?))
         .map_err(|e| format!("{}: {e}", path.display()))?;
     let base = parent(path);
@@ -287,7 +231,7 @@ fn inspect(path: &Path, display_base: &Path, workspace: &Path, progress: bool) -
             .as_str()
             .ok_or("Buffers without a URI (.glb) are unsupported")?;
         let path = base.join(decode_uri(uri)?);
-        let map = crate::obj::map(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let map = map(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         if (map.len() as u64) < buffer["byteLength"].as_u64().unwrap_or(0) {
             return Err(format!("{} is shorter than its byteLength", path.display()).into());
         }
@@ -418,51 +362,6 @@ fn inspect(path: &Path, display_base: &Path, workspace: &Path, progress: bool) -
             )
         }),
     ))
-}
-fn ratio(used: u64, total: u64) -> String {
-    if total == 0 {
-        "-".into()
-    } else {
-        format!("{:.3}", used as f64 / total as f64)
-    }
-}
-fn report<'a>(
-    vertices: u64,
-    faces: u64,
-    textures: impl Iterator<Item = (&'a str, u32, u32, u64, u64)>,
-) -> String {
-    let textures: Vec<_> = textures.collect();
-    let used: u64 = textures.iter().map(|t| t.3).sum();
-    let total: u64 = textures.iter().map(|t| t.4).sum();
-    let plural = if textures.len() == 1 { "" } else { "s" };
-    let mut out = format!(
-        "Vertices:           {}\nFaces:              {}\nDiffuse texels:     {} in {} texture{plural}\nTexture occupancy:  {}\n",
-        fmt_count(vertices),
-        fmt_count(faces),
-        fmt_count(total),
-        textures.len(),
-        ratio(used, total),
-    );
-    if !textures.is_empty() {
-        let width = textures
-            .iter()
-            .map(|t| t.0.chars().count())
-            .max()
-            .unwrap()
-            .max(7);
-        out.push_str(&format!(
-            "\n{:width$}  {:>11}  Occupancy\n",
-            "Texture", "Size"
-        ));
-        for (name, w, h, used, total) in textures {
-            let size = format!("{w}x{h}");
-            out.push_str(&format!(
-                "{name:width$}  {size:>11}  {}\n",
-                ratio(used, total)
-            ));
-        }
-    }
-    out
 }
 #[cfg(test)]
 mod tests {

@@ -1,5 +1,5 @@
 //! Conservative Phong -> PBR policy: no inferred metals, explicit specular extension.
-use crate::import::Res;
+use crate::shared::Res;
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,

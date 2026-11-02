@@ -16,10 +16,8 @@ use std::io::{BufReader, BufWriter, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::fixed::{format_fixed_as_decimal, parse_decimal_fixed};
-use crate::format::fmt_bytes;
-
-type Res<T> = Result<T, Box<dyn std::error::Error>>;
+use super::fixed::{format_fixed_as_decimal, parse_decimal_fixed};
+use crate::shared::{format::fmt_bytes, Res};
 
 /// Makes every spool file name unique within this process; the pid separates processes.
 /// A per-shape counter is not enough: several conversions can run concurrently in one process
@@ -276,7 +274,7 @@ fn read_face(r: &mut impl Read, out: &mut Vec<i32>) -> std::io::Result<bool> {
                         "VRML index must be >= 0 or -1",
                     ));
                 }
-                if out.len() >= crate::obj::MAX_FACE {
+                if out.len() >= super::obj::MAX_FACE {
                     return Err(std::io::Error::new(
                         ErrorKind::InvalidData,
                         "VRML face exceeds corner limit",

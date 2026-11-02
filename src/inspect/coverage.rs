@@ -3,7 +3,7 @@
 //! with nearest filtering the texel containing the point, with linear filtering the 2x2 texels
 //! around it. Texels shared by several triangles count once, and padding no sample reaches is
 //! never counted.
-use crate::import::Res;
+use crate::shared::Res;
 use memmap2::MmapMut;
 use std::{fs::OpenOptions, path::Path};
 /// Texel coordinates beyond this are rejected rather than overflowing integer texel indices.
