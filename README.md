@@ -47,6 +47,7 @@ objtools inspect [OPTIONS] <file.gltf|file.obj|file.wrl|file.vrml>
 
     --tmp-dir DIR  Workspace for the import and coverage maps (default: the input's directory)
     --keep-tmp     Preserve the workspace for debugging
+    --json         Print the statistics as JSON
     --progress     Report progress on stderr
 -h, --help         Show help
 ```
@@ -67,6 +68,8 @@ Texture occupancy:  0.018
 Texture                                        Size  Occupancy
 Arc_de_Triomphe_FULL_u1_v1_diffuse.png  16384x16384  0.018
 ```
+
+`--json` prints the same statistics as JSON on stdout, with exact counts and unrounded occupancy. Its structure is not documented yet and may change between versions. Warnings and progress stay on stderr.
 
 OBJ and VRML inputs are first converted in a private workspace, then measured and cleaned up. The figures match those of the imported glTF; textures are referenced without conversion and import warnings still reach stderr.
 

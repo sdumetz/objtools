@@ -18,6 +18,8 @@ pub struct Options {
     pub tmp_dir: Option<PathBuf>,
     pub keep_tmp: bool,
     pub progress: bool,
+    /// Print the report as JSON rather than pretty-printed.
+    pub json: bool,
 }
 fn parent(path: &Path) -> &Path {
     path.parent()
@@ -66,6 +68,11 @@ pub fn run(opts: Options) -> Res<()> {
     };
     let display_base = fs::canonicalize(parent(&opts.input))?;
     let report = measure::measure(&gltf, &display_base, &workspace.path, opts.progress)?;
-    print!("{report}");
+    // Only the report reaches stdout, so that it can be piped; warnings and progress use stderr.
+    if opts.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print!("{report}");
+    }
     Ok(())
 }

@@ -3,7 +3,7 @@
 use super::{
     coverage::{Coverage, Filter, Wrap},
     parent,
-    report::report,
+    report::{Report, TextureReport},
 };
 use crate::shared::{disk::map, format::fmt_count, Res};
 use memmap2::Mmap;
@@ -221,7 +221,7 @@ fn dimensions(
 }
 /// Each mesh is counted once, however many nodes instance it, and a POSITION accessor shared
 /// by several primitives counts its vertices once.
-pub fn measure(path: &Path, display_base: &Path, workspace: &Path, progress: bool) -> Res<String> {
+pub fn measure(path: &Path, display_base: &Path, workspace: &Path, progress: bool) -> Res<Report> {
     let root: Value = serde_json::from_reader(BufReader::new(File::open(path)?))
         .map_err(|e| format!("{}: {e}", path.display()))?;
     let base = parent(path);
@@ -348,20 +348,11 @@ pub fn measure(path: &Path, display_base: &Path, workspace: &Path, progress: boo
     if skipped > 0 {
         eprintln!("Warning: {skipped} UV triangles repeating their texture more than 64 times were left out of occupancy");
     }
-    Ok(report(
-        vertices,
-        faces,
-        textures.values().map(|t| {
-            let total = u64::from(t.width) * u64::from(t.height);
-            (
-                t.name.as_str(),
-                t.width,
-                t.height,
-                t.coverage.count(),
-                total,
-            )
-        }),
-    ))
+    let textures = textures
+        .into_values()
+        .map(|t| TextureReport::new(t.name, t.width, t.height, t.coverage.count()))
+        .collect();
+    Ok(Report::new(vertices, faces, textures))
 }
 #[cfg(test)]
 mod tests {

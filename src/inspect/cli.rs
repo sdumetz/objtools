@@ -7,6 +7,7 @@ pub fn run(args: impl Iterator<Item = String>) -> Res<()> {
     let mut tmp_dir = None;
     let mut progress = false;
     let mut keep_tmp = false;
+    let mut json = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--help" | "-h" => {
@@ -20,6 +21,7 @@ pub fn run(args: impl Iterator<Item = String>) -> Res<()> {
             }
             "--progress" => progress = true,
             "--keep-tmp" => keep_tmp = true,
+            "--json" => json = true,
             _ if arg.starts_with('-') => return Err(format!("Unknown option: {arg}").into()),
             _ if input.is_none() => input = Some(PathBuf::from(arg)),
             _ => return Err(format!("Unexpected argument: {arg}").into()),
@@ -30,8 +32,9 @@ pub fn run(args: impl Iterator<Item = String>) -> Res<()> {
         tmp_dir,
         keep_tmp,
         progress,
+        json,
     })
 }
 fn help() {
-    println!("Usage: objtools inspect [OPTIONS] <file.gltf|file.obj|file.wrl|file.vrml>\n\nReport the vertex and face counts, diffuse texel count and texture occupancy of a\nmodel. OBJ and VRML are imported into a temporary workspace first, so the figures are\nthose of the glTF that `objtools import` would write.\n\n      --tmp-dir DIR  Workspace for the import and coverage maps (default: input directory)\n      --keep-tmp     Keep the workspace for debugging\n      --progress     Report progress on stderr\n  -h, --help         Show help");
+    println!("Usage: objtools inspect [OPTIONS] <file.gltf|file.obj|file.wrl|file.vrml>\n\nReport the vertex and face counts, diffuse texel count and texture occupancy of a\nmodel. OBJ and VRML are imported into a temporary workspace first, so the figures are\nthose of the glTF that `objtools import` would write.\n\n      --tmp-dir DIR  Workspace for the import and coverage maps (default: input directory)\n      --keep-tmp     Keep the workspace for debugging\n      --json         Print the statistics as JSON; the structure may still change\n      --progress     Report progress on stderr\n  -h, --help         Show help");
 }

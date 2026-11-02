@@ -1,3 +1,4 @@
+use serde_json::{json, Value};
 use std::{
     fs,
     path::PathBuf,
@@ -35,6 +36,15 @@ impl Fixture {
         );
         String::from_utf8(out.stdout).unwrap()
     }
+    fn inspect_json(&self, input: &str) -> Value {
+        let out = self.run(&["inspect", "--json"], input);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice(&out.stdout).unwrap()
+    }
     fn entries(&self) -> Vec<String> {
         let mut names: Vec<_> = fs::read_dir(&self.0)
             .unwrap()
@@ -71,6 +81,51 @@ fn reports_counts_and_counts_overlapping_texels_once() {
     assert_eq!(f.entries(), ["in.mtl", "in.obj", "source.png"]);
 }
 #[test]
+fn json_reports_the_same_statistics_unrounded() {
+    let f = half_textured("source.png");
+    assert_eq!(
+        f.inspect_json("in.obj"),
+        json!({
+            "vertices": 8,
+            "faces": 4,
+            "diffuse_texels": 64,
+            "occupied_texels": 24,
+            "texture_occupancy": 0.375,
+            "textures": [{
+                "name": "source.png",
+                "width": 8,
+                "height": 8,
+                "occupied_texels": 24,
+                "occupancy": 0.375,
+            }],
+        })
+    );
+    assert_eq!(f.entries(), ["in.mtl", "in.obj", "source.png"]);
+}
+#[test]
+fn json_of_an_untextured_model_has_no_occupancy() {
+    let f = Fixture::new();
+    f.file("in.obj", "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n");
+    let report = f.inspect_json("in.obj");
+    assert_eq!(report["faces"], 1);
+    assert_eq!(report["texture_occupancy"], Value::Null);
+    assert_eq!(report["textures"], json!([]));
+}
+#[test]
+fn json_stdout_stays_parseable_with_warnings_and_progress() {
+    // The undefined material warns during the private import.
+    let f = Fixture::new();
+    f.file(
+        "in.obj",
+        "v 0 0 0\nv 1 0 0\nv 0 1 0\nusemtl undefined\nf 1 2 3\n",
+    );
+    let out = f.run(&["inspect", "--json", "--progress"], "in.obj");
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("Warning: undefined material"));
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["vertices"], 3);
+}
+#[test]
 fn obj_report_matches_report_of_imported_gltf() {
     let f = half_textured("source.png");
     let out = f.run(&["import"], "in.obj");
@@ -80,6 +135,7 @@ fn obj_report_matches_report_of_imported_gltf() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert_eq!(f.inspect("in.obj"), f.inspect("in.gltf"));
+    assert_eq!(f.inspect_json("in.obj"), f.inspect_json("in.gltf"));
 }
 #[test]
 fn textures_gltf_cannot_carry_are_measured_without_conversion() {
