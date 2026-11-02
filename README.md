@@ -1,6 +1,6 @@
 # objtools
 
-A Rust command-line tool for converting very large OBJ, VRML and glTF meshes to glTF 2.0 and inspecting model statistics. It handles georeferenced coordinates and models [larger than available RAM](https://github.com/sdumetz/objtools/wiki/Resource-usage-comparison), using a disk workspace.
+A Rust command-line tool for converting very large OBJ, VRML and glTF meshes to glTF 2.0, inspecting model statistics and building rough placeholders. It handles georeferenced coordinates and models [larger than available RAM](https://github.com/sdumetz/objtools/wiki/Resource-usage-comparison), using a disk workspace.
 
 ## Install
 Download a binary from latest [release](https://github.com/sdumetz/objtools/releases) or install from a repository checkout with [Rust and Cargo](https://www.rust-lang.org/tools/install):
@@ -98,18 +98,51 @@ Supported glTF inputs are `.gltf` and `.glb`, with external, embedded or base64 
 
 Textures using `KHR_texture_basisu`, `EXT_texture_webp` or `EXT_texture_avif` are measured from the extension's image rather than its fallback, and only their headers are read. A file that requires an extension `inspect` doesn't support is rejected, which includes Draco and meshopt compression. Optional compression is skipped when the file also has uncompressed data, and any other unknown optional extension is ignored with a warning. Material variants (`KHR_materials_variants`) aren't supported, and a warning says so: occupancy comes only from each primitive's default material, so a texture only the variants use counts as unoccupied.
 
+## Build a placeholder
+
+```text
+objtools placeholder [OPTIONS] <file.gltf|file.glb|file.obj|file.wrl|file.vrml>
+
+-o, --output FILE   Destination .gltf (default: input with .placeholder.gltf extension)
+    --resolution N  Cells along the longest axis, 2..128 (default 16)
+    --threads N     Worker threads (default: all available); each holds its own grid
+    --center        OBJ/VRML/GLB: subtract the bounding-box center, as import does
+    --up-axis AXIS  OBJ/VRML/GLB: source up axis, y (default) or z
+    --tmp-dir DIR   Workspace for the import (default: the output's directory)
+    --keep-tmp      Preserve the workspace for debugging
+    --progress      Report progress on stderr
+-h, --help          Show help
+```
+
+```sh
+objtools placeholder model.gltf
+objtools placeholder terrain.obj --center --resolution 64 -o terrain.placeholder.gltf
+```
+
+A placeholder is a low-poly stand-in with a blue and light gray checker, to display while a model is processed. It overlays what its source's default scene shows at rest: it keeps the stored coordinates and node transforms of the first mesh node, and the origin metadata, and places any other nodes and GPU instances relative to them. Animations, skins and morph targets aren't followed. Its size depends on the resolution and the model's shape, not on its face count. Across 32 real scans of 0.1 to 2.3 million faces:
+
+| Resolution | Median faces (range) | Median size (range) |
+| --- | --- | --- |
+| 16 | 1.7k (400–3.3k) | 50 kB (13–100 kB) |
+| 32 | 7k (1.2k–14k) | 200 kB (35–400 kB) |
+| 64 | 28k (4.4k–59k) | 775 kB (120 kB–1.8 MB) |
+
+A placeholder is deliberately approximate, unlike an import. It may cut slightly into the model and bevels sharp edges by about one cell. Enclosed interior geometry is left out, and holes stay open down to a few cells. Open surfaces become thin sheets, and if an opening lets the outside in, inner walls are kept. Small parts disconnected from the model, such as scan noise, are left out with a warning. A part that fits inside a single cell collapses and disappears, so a scene of objects far apart may need a higher `--resolution`.
+
+A `.gltf` input must have been written by `objtools import`, and other `.gltf` files are rejected. Quantized or sparse positions aren't supported. `--center` and `--up-axis` only apply to OBJ, VRML and GLB, which are imported into a private workspace first: use the same choices as for the model the placeholder stands in for. The wiki explains [how placeholders are built](https://github.com/sdumetz/objtools/wiki/Placeholders).
+
 ## Working with large or georeferenced models
 
-- Keep the workspace on a real disk with ample free space. It defaults to the output directory for `import` and the input directory for `inspect`; use `--tmp-dir` to choose another location. An SSD helps with large imports. Temporary files are cleaned up automatically.
+- Keep the workspace on a real disk with ample free space. It defaults to the output directory for `import` and `placeholder`, and the input directory for `inspect`; use `--tmp-dir` to choose another location. An SSD helps with large imports. Temporary files are cleaned up automatically.
 - Use `--center` to preserve local detail in georeferenced coordinates. The original origin is stored in the glTF metadata. Files centered independently have different origins, which must be accounted for to keep them aligned.
 - Coordinates are assumed to be in metres. No coordinate-system reprojection or unit conversion is performed.
 - Material conversion approximates the source appearance. Unsupported data is generally omitted with a warning; VRML support covers a subset of IndexedFaceSet scenes.
 
 ## Documentation
 
-Run `objtools import --help` or `objtools inspect --help` for command help.
+Run `objtools import --help`, `objtools inspect --help` or `objtools placeholder --help` for command help.
 
 The [Wiki](https://github.com/sdumetz/objtools/wiki) covers:
 
 - [Conversion](https://github.com/sdumetz/objtools/wiki/Conversion): supported formats, georeferencing, image formats and material approximations.
-- [How it works](https://github.com/sdumetz/objtools/wiki/How-it-works): the streaming pipeline, heap and memory-mapped files, disk requirements and texture coverage calculations.
+- [How it works](https://github.com/sdumetz/objtools/wiki/How-it-works): the streaming pipeline, heap and memory-mapped files, disk requirements, texture coverage calculations and placeholders.

@@ -18,6 +18,48 @@ pub fn multiply(a: &Matrix, b: &Matrix) -> Matrix {
 pub fn apply(m: &Matrix, p: [f64; 3]) -> [f64; 3] {
     std::array::from_fn(|i| m[i] * p[0] + m[4 + i] * p[1] + m[8 + i] * p[2] + m[12 + i])
 }
+/// The inverse of an affine matrix, which is what glTF's node matrices are. `None` when it flattens
+/// space: its determinant is compared with its columns' lengths, so that a small but uniform scale
+/// still counts as invertible.
+pub fn invert(m: &Matrix) -> Option<Matrix> {
+    let column = |c: usize| [m[c * 4], m[c * 4 + 1], m[c * 4 + 2]];
+    let cross = |a: [f64; 3], b: [f64; 3]| {
+        [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ]
+    };
+    let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    let (a, b, c) = (column(0), column(1), column(2));
+    let (bc, ca, ab) = (cross(b, c), cross(c, a), cross(a, b));
+    let det = dot(a, bc);
+    let lengths = (dot(a, a) * dot(b, b) * dot(c, c)).sqrt();
+    if !det.is_finite() || det.abs() <= 1e-12 * lengths {
+        return None;
+    }
+    let row = |r: [f64; 3]| r.map(|v| v / det);
+    let (x, y, z) = (row(bc), row(ca), row(ab));
+    let t = [m[12], m[13], m[14]];
+    Some([
+        x[0],
+        y[0],
+        z[0],
+        0.,
+        x[1],
+        y[1],
+        z[1],
+        0.,
+        x[2],
+        y[2],
+        z[2],
+        0.,
+        -dot(x, t),
+        -dot(y, t),
+        -dot(z, t),
+        1.,
+    ])
+}
 pub fn trs(t: [f64; 3], [x, y, z, w]: [f64; 4], s: [f64; 3]) -> Matrix {
     [
         (1. - 2. * (y * y + z * z)) * s[0],
@@ -104,4 +146,28 @@ pub fn instance_matrix([t, r, s]: &Instancing, i: usize) -> Matrix {
         ],
         std::array::from_fn(|c| read(s, 1., c)),
     )
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn inverse_undoes_a_transform() {
+        let s = 0.5f64.sqrt();
+        let m = trs([5., -7., 9.], [s, 0., 0., s], [2., 0.001, -3.]);
+        let product = multiply(&m, &invert(&m).unwrap());
+        for (a, b) in product.iter().zip(&IDENTITY) {
+            assert!((a - b).abs() < 1e-9, "{product:?}");
+        }
+    }
+    #[test]
+    fn only_flattening_transforms_have_no_inverse() {
+        let at = |s: [f64; 3]| invert(&trs([1., 2., 3.], [0., 0., 0., 1.], s));
+        assert!(at([1e-20; 3]).is_some());
+        assert!(at([1., 1., 0.]).is_none());
+        assert!(at([0.; 3]).is_none());
+        // Two equal axes have no volume, whatever their length.
+        let mut sheared = IDENTITY;
+        sheared[4..7].copy_from_slice(&[1., 0., 0.]);
+        assert!(invert(&sheared).is_none());
+    }
 }

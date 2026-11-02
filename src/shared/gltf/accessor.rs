@@ -83,6 +83,12 @@ impl<'a> Accessor<'a> {
     pub fn is_dense(&self) -> bool {
         self.data.is_some() && self.sparse.is_none()
     }
+    /// The stored elements and their stride, for loops too hot for `get`. `None` unless dense.
+    pub fn dense(&self) -> Option<(&'a [u8], usize)> {
+        self.data
+            .filter(|_| self.sparse.is_none())
+            .map(|d| (d, self.stride))
+    }
     /// The element's value as stored, before normalization.
     pub fn raw(&self, i: usize, c: usize) -> f64 {
         let size = self.components * self.width;
