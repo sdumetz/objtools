@@ -1,6 +1,6 @@
 //! Source image policy and optional decoding/encoding, one image at a time.
 use super::material::Material;
-use crate::shared::Res;
+use crate::shared::{disk::parent, Res};
 use std::{
     collections::{HashMap, HashSet},
     fs::{self, File},
@@ -79,11 +79,6 @@ pub struct Plan {
     pub uri: String,
     /// Whether the content is a published glTF image whose transparency must be scanned.
     scan: bool,
-}
-fn parent(path: &Path) -> &Path {
-    path.parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."))
 }
 fn relative_uri(source: &Path, destination: &Path) -> Res<String> {
     let from: Vec<_> = destination.components().collect();

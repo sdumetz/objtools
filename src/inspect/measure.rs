@@ -1,12 +1,14 @@
-//! Statistics read from a glTF. Buffers are mapped, and texel coverage lives in mapped workspace
-//! files: nothing whole-model is held on the heap.
+//! Statistics read from a glTF or GLB. Buffers are mapped, and texel coverage lives in mapped
+//! workspace files: nothing whole-model is held on the heap.
 use super::{
     coverage::{Coverage, Filter, Wrap},
-    extensions, parent,
     report::{Report, TextureReport},
 };
-use crate::shared::{disk::map, format::fmt_count, Res};
-use memmap2::Mmap;
+use crate::shared::{
+    format::fmt_count,
+    gltf::{element, extensions, index, Accessor, Gltf, Image},
+    Res,
+};
 use serde_json::Value;
 use std::{
     collections::{btree_map::Entry, BTreeMap, HashSet},
@@ -19,125 +21,6 @@ struct Texture {
     width: u32,
     height: u32,
     coverage: Coverage,
-}
-/// Undo URI path escaping; `gltf::uri` writes `%XX` for every byte outside the unreserved set.
-fn decode_uri(uri: &str) -> Res<PathBuf> {
-    if uri.starts_with("data:") {
-        return Err("Embedded data: URIs are unsupported".into());
-    }
-    let bytes = uri.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' {
-            let hex = std::str::from_utf8(bytes.get(i + 1..i + 3).ok_or("Truncated URI escape")?)?;
-            out.push(u8::from_str_radix(hex, 16)?);
-            i += 3;
-        } else {
-            out.push(bytes[i]);
-            i += 1;
-        }
-    }
-    Ok(PathBuf::from(String::from_utf8(out)?))
-}
-fn index(value: &Value, what: &str) -> Res<usize> {
-    let n = value
-        .as_u64()
-        .ok_or_else(|| format!("Missing or invalid {what} index"))?;
-    Ok(usize::try_from(n)?)
-}
-fn element<'a>(root: &'a Value, array: &str, i: usize) -> Res<&'a Value> {
-    root[array]
-        .get(i)
-        .ok_or_else(|| format!("{array}[{i}] does not exist").into())
-}
-/// A buffer view's bytes, bounds-checked against its mapped buffer.
-fn view<'a>(root: &Value, buffers: &'a [Mmap], id: usize) -> Res<(&'a [u8], Option<usize>)> {
-    let v = element(root, "bufferViews", id)?;
-    let buffer = buffers
-        .get(index(&v["buffer"], "buffer")?)
-        .ok_or("Buffer view references a missing buffer")?;
-    let start = usize::try_from(v["byteOffset"].as_u64().unwrap_or(0))?;
-    let length = index(&v["byteLength"], "byteLength")?;
-    let bytes = start
-        .checked_add(length)
-        .and_then(|end| buffer.get(start..end))
-        .ok_or("Buffer view exceeds its buffer")?;
-    let stride = v["byteStride"].as_u64().map(usize::try_from).transpose()?;
-    Ok((bytes, stride))
-}
-struct Accessor<'a> {
-    data: &'a [u8],
-    count: usize,
-    components: usize,
-    stride: usize,
-    width: usize,
-    kind: u64,
-    normalized: bool,
-}
-impl<'a> Accessor<'a> {
-    fn new(root: &Value, buffers: &'a [Mmap], id: usize) -> Res<Self> {
-        let a = element(root, "accessors", id)?;
-        if a.get("sparse").is_some() {
-            return Err(format!("Accessor {id}: sparse accessors are unsupported").into());
-        }
-        let count = index(&a["count"], "count")?;
-        let components = match a["type"].as_str() {
-            Some("SCALAR") => 1,
-            Some("VEC2") => 2,
-            Some("VEC3") => 3,
-            Some("VEC4") => 4,
-            _ => return Err(format!("Accessor {id}: unsupported type").into()),
-        };
-        let kind = a["componentType"].as_u64().unwrap_or(0);
-        let width = match kind {
-            5120 | 5121 => 1,
-            5122 | 5123 => 2,
-            5125 | 5126 => 4,
-            _ => return Err(format!("Accessor {id}: unsupported component type").into()),
-        };
-        let (bytes, stride) = view(root, buffers, index(&a["bufferView"], "bufferView")?)?;
-        let size = components * width;
-        let stride = stride.unwrap_or(size);
-        let start = usize::try_from(a["byteOffset"].as_u64().unwrap_or(0))?;
-        let needed = match count {
-            0 => 0,
-            n => (n - 1)
-                .checked_mul(stride)
-                .and_then(|n| n.checked_add(size))
-                .ok_or("Accessor size overflow")?,
-        };
-        let data = start
-            .checked_add(needed)
-            .and_then(|end| bytes.get(start..end))
-            .ok_or_else(|| format!("Accessor {id} exceeds its buffer view"))?;
-        Ok(Self {
-            data,
-            count,
-            components,
-            stride,
-            width,
-            kind,
-            normalized: a["normalized"].as_bool().unwrap_or(false),
-        })
-    }
-    fn get(&self, i: usize, c: usize) -> f64 {
-        let o = i * self.stride + c * self.width;
-        let b = &self.data[o..o + self.width];
-        let (raw, max) = match self.kind {
-            5120 => (f64::from(b[0] as i8), 127.),
-            5121 => (f64::from(b[0]), 255.),
-            5122 => (f64::from(i16::from_le_bytes([b[0], b[1]])), 32767.),
-            5123 => (f64::from(u16::from_le_bytes([b[0], b[1]])), 65535.),
-            5125 => (f64::from(u32::from_le_bytes(b.try_into().unwrap())), 1.),
-            _ => return f64::from(f32::from_le_bytes(b.try_into().unwrap())),
-        };
-        if self.normalized {
-            (raw / max).max(-1.)
-        } else {
-            raw
-        }
-    }
 }
 /// `KHR_texture_transform`, the UVs a renderer actually samples with: `T · R · S · uv`, from the
 /// extension's reference shader (GLSL matrices are column-major, so R's first column is
@@ -198,36 +81,30 @@ fn container_size(reader: impl BufRead + Seek) -> Option<(u32, u32)> {
     (size.0 > 0 && size.1 > 0).then_some(size)
 }
 /// Width and height from the image header, without decoding pixels.
-fn dimensions(
-    root: &Value,
-    base: &Path,
-    buffers: &[Mmap],
-    id: usize,
-    display_base: &Path,
-) -> Res<(String, u32, u32)> {
-    let image = element(root, "images", id)?;
-    if let Some(uri) = image["uri"].as_str() {
-        let path = base.join(decode_uri(uri)?);
-        let (width, height) = (|| -> Res<_> {
-            if let Some(size) = container_size(BufReader::new(File::open(&path)?)) {
-                return Ok(size);
-            }
-            Ok(image::ImageReader::open(&path)?
-                .with_guessed_format()?
-                .into_dimensions()?)
-        })()
-        .map_err(|e| format!("Texture {}: {e}", path.display()))?;
-        let name = relative(&fs::canonicalize(&path)?, display_base);
-        return Ok((name.display().to_string(), width, height));
-    }
-    let (bytes, _) = view(root, buffers, index(&image["bufferView"], "bufferView")?)?;
+fn dimensions(gltf: &Gltf, id: usize, display_base: &Path) -> Res<(String, u32, u32)> {
+    let bytes = match gltf.image(id)? {
+        Image::Bytes(bytes) => bytes,
+        Image::File(path) => {
+            let (width, height) = (|| -> Res<_> {
+                if let Some(size) = container_size(BufReader::new(File::open(&path)?)) {
+                    return Ok(size);
+                }
+                Ok(image::ImageReader::open(&path)?
+                    .with_guessed_format()?
+                    .into_dimensions()?)
+            })()
+            .map_err(|e| format!("Texture {}: {e}", path.display()))?;
+            let name = relative(&fs::canonicalize(&path)?, display_base);
+            return Ok((name.display().to_string(), width, height));
+        }
+    };
     let (width, height) = match container_size(Cursor::new(bytes)) {
         Some(size) => size,
         None => image::ImageReader::new(Cursor::new(bytes))
             .with_guessed_format()?
             .into_dimensions()?,
     };
-    let name = image["name"]
+    let name = element(&gltf.root, "images", id)?["name"]
         .as_str()
         .map_or(format!("image {id}"), str::to_owned);
     Ok((name, width, height))
@@ -235,22 +112,8 @@ fn dimensions(
 /// Each mesh is counted once, however many nodes instance it, and a POSITION accessor shared
 /// by several primitives counts its vertices once.
 pub fn measure(path: &Path, display_base: &Path, workspace: &Path, progress: bool) -> Res<Report> {
-    let root: Value = serde_json::from_reader(BufReader::new(File::open(path)?))
-        .map_err(|e| format!("{}: {e}", path.display()))?;
-    extensions::check(&root)?;
-    let base = parent(path);
-    let mut buffers = Vec::new();
-    for buffer in root["buffers"].as_array().into_iter().flatten() {
-        let uri = buffer["uri"]
-            .as_str()
-            .ok_or("Buffers without a URI (.glb) are unsupported")?;
-        let path = base.join(decode_uri(uri)?);
-        let map = map(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        if (map.len() as u64) < buffer["byteLength"].as_u64().unwrap_or(0) {
-            return Err(format!("{} is shorter than its byteLength", path.display()).into());
-        }
-        buffers.push(map);
-    }
+    let gltf = Gltf::open(path, workspace)?;
+    let root = &gltf.root;
     // Every image a material samples as its base colour, in image order.
     let mut textures = BTreeMap::new();
     for material in root["materials"].as_array().into_iter().flatten() {
@@ -258,10 +121,10 @@ pub fn measure(path: &Path, display_base: &Path, workspace: &Path, progress: boo
         if info.is_null() {
             continue;
         }
-        let texture = element(&root, "textures", index(&info["index"], "texture")?)?;
+        let texture = element(root, "textures", index(&info["index"], "texture")?)?;
         let image = extensions::texture_source(texture)?;
         if let Entry::Vacant(slot) = textures.entry(image) {
-            let (name, width, height) = dimensions(&root, base, &buffers, image, display_base)?;
+            let (name, width, height) = dimensions(&gltf, image, display_base)?;
             let file = workspace.join(format!("coverage-{image}"));
             let coverage = Coverage::create(&file, width, height)?;
             slot.insert(Texture {
@@ -279,15 +142,15 @@ pub fn measure(path: &Path, display_base: &Path, workspace: &Path, progress: boo
     let mut skipped = 0u64;
     let meshes = root["meshes"].as_array().into_iter().flatten();
     for primitive in meshes.flat_map(|m| m["primitives"].as_array().into_iter().flatten()) {
-        extensions::check_primitive(&root, primitive)?;
+        extensions::check_primitive(root, primitive)?;
         let attributes = &primitive["attributes"];
         let position = index(&attributes["POSITION"], "POSITION accessor")?;
-        let count = index(&element(&root, "accessors", position)?["count"], "count")?;
+        let count = index(&element(root, "accessors", position)?["count"], "count")?;
         if positions.insert(position) {
             vertices += count as u64;
         }
         let indices = match primitive.get("indices") {
-            Some(id) => Some(Accessor::new(&root, &buffers, index(id, "indices")?)?),
+            Some(id) => Some(Accessor::new(&gltf, index(id, "indices")?)?),
             None => None,
         };
         if let Some(a) = &indices {
@@ -306,17 +169,17 @@ pub fn measure(path: &Path, display_base: &Path, workspace: &Path, progress: boo
         let Some(material) = primitive.get("material") else {
             continue;
         };
-        let material = element(&root, "materials", index(material, "material")?)?;
+        let material = element(root, "materials", index(material, "material")?)?;
         let info = &material["pbrMetallicRoughness"]["baseColorTexture"];
         if info.is_null() {
             continue;
         }
         let transform = UvTransform::new(&info["extensions"]["KHR_texture_transform"])?;
-        let texture = element(&root, "textures", index(&info["index"], "texture")?)?;
+        let texture = element(root, "textures", index(&info["index"], "texture")?)?;
         // A missing sampler means repeat wrapping and engine-default (linear) filtering.
         let (wrap, filter) = match texture["sampler"].as_u64() {
             Some(id) => {
-                let sampler = element(&root, "samplers", usize::try_from(id)?)?;
+                let sampler = element(root, "samplers", usize::try_from(id)?)?;
                 let mode = |key: &str| Wrap::from_gl(sampler[key].as_u64().unwrap_or(10497));
                 let filter =
                     Filter::from_gl(sampler["magFilter"].as_u64(), sampler["minFilter"].as_u64());
@@ -332,7 +195,7 @@ pub fn measure(path: &Path, display_base: &Path, workspace: &Path, progress: boo
         let uv = attributes
             .get(format!("TEXCOORD_{set}"))
             .ok_or_else(|| format!("Textured primitive has no TEXCOORD_{set}"))?;
-        let uv = Accessor::new(&root, &buffers, index(uv, "TEXCOORD")?)?;
+        let uv = Accessor::new(&gltf, index(uv, "TEXCOORD")?)?;
         if uv.components != 2 || uv.count != count {
             return Err("TEXCOORD accessor must be VEC2 with one value per vertex".into());
         }

@@ -419,3 +419,301 @@ fn optional_draco_uses_uncompressed_data_or_is_an_error() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("KHR_draco_mesh_compression"), "{stderr}");
 }
+fn read_gltf(f: &Fixture) -> Value {
+    serde_json::from_slice(&fs::read(f.0.join("in.gltf")).unwrap()).unwrap()
+}
+/// A GLB holding `root` and an optional BIN chunk, with the padding the container requires.
+fn glb(root: &Value, bin: Option<&[u8]>) -> Vec<u8> {
+    let mut json = root.to_string().into_bytes();
+    json.resize(json.len().next_multiple_of(4), b' ');
+    let mut chunks = (json.len() as u32).to_le_bytes().to_vec();
+    chunks.extend(b"JSON");
+    chunks.extend(&json);
+    if let Some(bin) = bin {
+        let mut bin = bin.to_vec();
+        bin.resize(bin.len().next_multiple_of(4), 0);
+        chunks.extend((bin.len() as u32).to_le_bytes());
+        chunks.extend(b"BIN\0");
+        chunks.extend(&bin);
+    }
+    let mut out = b"glTF".to_vec();
+    out.extend(2u32.to_le_bytes());
+    out.extend((chunks.len() as u32 + 12).to_le_bytes());
+    out.extend(chunks);
+    out
+}
+/// `in.gltf` and its geometry as a GLB, with the external image left as it is.
+fn packed() -> (Fixture, Value, Vec<u8>) {
+    let f = imported_gltf(|root| {
+        root["buffers"][0].as_object_mut().unwrap().remove("uri");
+    });
+    let root = read_gltf(&f);
+    let bin = fs::read(f.0.join("in.bin")).unwrap();
+    (f, root, bin)
+}
+fn base64(bytes: &[u8]) -> String {
+    const LETTERS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let group =
+            chunk.iter().fold(0u32, |n, b| n << 8 | u32::from(*b)) << (8 * (3 - chunk.len()));
+        for i in 0..4 {
+            out.push(if i <= chunk.len() {
+                LETTERS[(group >> (18 - 6 * i) & 63) as usize] as char
+            } else {
+                '='
+            });
+        }
+    }
+    out
+}
+#[test]
+fn glb_reports_the_same_statistics_as_gltf() {
+    let expected = half_textured("source.png");
+    assert!(expected.run(&["import"], "in.obj").status.success());
+    let (f, root, bin) = packed();
+    fs::remove_file(f.0.join("in.bin")).unwrap();
+    fs::write(f.0.join("in.glb"), glb(&root, Some(&bin))).unwrap();
+    assert_eq!(f.inspect_json("in.glb"), expected.inspect_json("in.gltf"));
+    assert!(!f.entries().iter().any(|e| e.starts_with("objtools-")));
+}
+#[test]
+fn glb_images_are_read_from_the_bin_chunk() {
+    let (f, mut root, mut bin) = packed();
+    let png = fs::read(f.0.join("source.png")).unwrap();
+    fs::remove_file(f.0.join("source.png")).unwrap();
+    let view = root["bufferViews"].as_array().unwrap().len();
+    root["bufferViews"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"buffer": 0, "byteOffset": bin.len(), "byteLength": png.len()}));
+    bin.extend(&png);
+    root["buffers"][0]["byteLength"] = json!(bin.len());
+    root["images"] = json!([{"bufferView": view, "mimeType": "image/png", "name": "paint"}]);
+    fs::write(f.0.join("in.glb"), glb(&root, Some(&bin))).unwrap();
+    let report = f.inspect_json("in.glb");
+    assert_eq!(report["occupied_texels"], 24);
+    assert_eq!(report["textures"][0]["name"], "paint");
+}
+#[test]
+fn glb_is_recognized_by_content_and_skips_unknown_chunks() {
+    let (f, root, bin) = packed();
+    let mut file = glb(&root, Some(&bin));
+    let mut unknown = 4u32.to_le_bytes().to_vec();
+    unknown.extend(b"XTRA\0\0\0\0");
+    file.extend(&unknown);
+    let length = file.len() as u32;
+    file[8..12].copy_from_slice(&length.to_le_bytes());
+    fs::write(f.0.join("packed.gltf"), &file).unwrap();
+    assert_eq!(f.inspect_json("packed.gltf")["occupied_texels"], 24);
+}
+#[test]
+fn malformed_glb_files_are_errors() {
+    let (f, root, bin) = packed();
+    let good = glb(&root, Some(&bin));
+    let mut version = good.clone();
+    version[4] = 1;
+    let mut long_chunk = good.clone();
+    long_chunk[12..16].copy_from_slice(&u32::MAX.to_le_bytes());
+    let mut only_header = good[..12].to_vec();
+    only_header[8..12].copy_from_slice(&12u32.to_le_bytes());
+    let mut second_buffer = root.clone();
+    second_buffer["buffers"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"byteLength": 4}));
+    let mut short = root.clone();
+    short["buffers"][0]["byteLength"] = json!(bin.len() + 64);
+    for (file, message) in [
+        (good[..4].to_vec(), "Truncated GLB"),
+        (good[..good.len() - 1].to_vec(), "Truncated GLB"),
+        (version, "Unsupported GLB version 1"),
+        (long_chunk, "Truncated GLB"),
+        (only_header, "no JSON chunk"),
+        (glb(&root, None), "Buffer 0 has no URI"),
+        (glb(&second_buffer, Some(&bin)), "Buffer 1 has no URI"),
+        (glb(&short, Some(&bin)), "shorter than its byteLength"),
+    ] {
+        fs::write(f.0.join("bad.glb"), file).unwrap();
+        let out = f.run(&["inspect"], "bad.glb");
+        assert!(!out.status.success(), "{message}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains(message), "{message}: {stderr}");
+        assert!(!f.entries().iter().any(|e| e.starts_with("objtools-")));
+    }
+}
+#[test]
+fn data_uris_are_decoded_without_external_files() {
+    let f = half_textured("source.png");
+    assert!(f.run(&["import"], "in.obj").status.success());
+    let mut root = read_gltf(&f);
+    let bin = base64(&fs::read(f.0.join("in.bin")).unwrap());
+    let png = base64(&fs::read(f.0.join("source.png")).unwrap());
+    root["buffers"][0]["uri"] = json!(format!("data:application/octet-stream;base64,{bin}"));
+    root["images"][0]["uri"] = json!(format!("data:image/png;base64,{png}"));
+    for name in ["in.bin", "source.png", "in.gltf", "in.obj", "in.mtl"] {
+        fs::remove_file(f.0.join(name)).unwrap();
+    }
+    f.file("in.gltf", &root.to_string());
+    let report = f.inspect_json("in.gltf");
+    assert_eq!(report["occupied_texels"], 24);
+    assert_eq!(report["textures"][0]["name"], "image 0");
+    assert_eq!(f.entries(), ["in.gltf"]);
+}
+#[test]
+fn undecodable_data_uris_are_errors() {
+    for (uri, message) in [
+        ("data:application/octet-stream,AAAA", "Only base64"),
+        (
+            "data:application/octet-stream;base64,A!AA",
+            "Invalid base64",
+        ),
+        ("data:application/octet-stream;base64,", "Empty data"),
+        ("data:application/octet-stream;base64", "Malformed data"),
+    ] {
+        let f = imported_gltf(|root| root["buffers"][0]["uri"] = json!(uri));
+        let out = f.run(&["inspect"], "in.gltf");
+        assert!(!out.status.success(), "{uri}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains(message), "{uri}: {stderr}");
+        assert!(stderr.contains("Buffer 0"), "{stderr}");
+    }
+}
+/// Make each UV accessor sparse: `indices` of its elements, encoded as `component`, take the
+/// values `map` gives their current UV. Without `keep_base` the other elements read as zeros.
+fn sparse_uvs(
+    component: u64,
+    indices: &[u32],
+    keep_base: bool,
+    map: impl Fn([f32; 2]) -> [f32; 2],
+) -> Fixture {
+    let f = imported_gltf(|_| {});
+    let mut root = read_gltf(&f);
+    let mut bin = fs::read(f.0.join("in.bin")).unwrap();
+    let uvs: Vec<u64> = root["meshes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| {
+            m["primitives"][0]["attributes"]["TEXCOORD_0"]
+                .as_u64()
+                .unwrap()
+        })
+        .collect();
+    for uv in uvs {
+        let accessor = root["accessors"][uv as usize].clone();
+        let view = &root["bufferViews"][accessor["bufferView"].as_u64().unwrap() as usize];
+        let start = (view["byteOffset"].as_u64().unwrap()
+            + accessor["byteOffset"].as_u64().unwrap()) as usize;
+        let stride = view["byteStride"].as_u64().unwrap() as usize;
+        let (mut encoded, mut values) = (Vec::new(), Vec::new());
+        for &i in indices {
+            match component {
+                5121 => encoded.push(i as u8),
+                5123 => encoded.extend((i as u16).to_le_bytes()),
+                _ => encoded.extend(i.to_le_bytes()),
+            }
+            // An index outside the accessor is only there to be rejected.
+            let at = start + i as usize * stride;
+            let number = |o: usize| {
+                bin.get(o..o + 4)
+                    .map_or(0., |b| f32::from_le_bytes(b.try_into().unwrap()))
+            };
+            for value in map([number(at), number(at + 4)]) {
+                values.extend(value.to_le_bytes());
+            }
+        }
+        let views = root["bufferViews"].as_array().unwrap().len();
+        for section in [&encoded, &values] {
+            bin.resize(bin.len().next_multiple_of(4), 0);
+            root["bufferViews"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"buffer": 0, "byteOffset": bin.len(), "byteLength": section.len()}));
+            bin.extend(section);
+        }
+        let target = root["accessors"][uv as usize].as_object_mut().unwrap();
+        if !keep_base {
+            target.remove("bufferView");
+            target.remove("byteOffset");
+        }
+        target.insert(
+            "sparse".into(),
+            json!({
+                "count": indices.len(),
+                "indices": {"bufferView": views, "componentType": component},
+                "values": {"bufferView": views + 1},
+            }),
+        );
+    }
+    root["buffers"][0]["byteLength"] = json!(bin.len());
+    f.file("in.gltf", &root.to_string());
+    fs::write(f.0.join("in.bin"), bin).unwrap();
+    f
+}
+#[test]
+fn sparse_accessors_replace_elements_of_their_base() {
+    let f = half_textured("source.png");
+    assert!(f.run(&["import"], "in.obj").status.success());
+    let plain = f.inspect_json("in.gltf");
+    // The same values, over a base or over zeros, change nothing.
+    for component in [5121, 5123, 5125] {
+        let same = sparse_uvs(component, &[0, 1, 2, 3], false, |uv| uv);
+        assert_eq!(same.inspect_json("in.gltf"), plain, "{component}");
+    }
+    // Elements left out keep their base values.
+    let partial = sparse_uvs(5123, &[1, 3], true, |uv| uv);
+    assert_eq!(partial.inspect_json("in.gltf"), plain);
+    // New values take effect: the quad's UVs now span the whole texture.
+    let spread = |[u, v]: [f32; 2]| [(u - 0.25) * 4., (v - 0.25) * 2.];
+    let whole = sparse_uvs(5125, &[0, 1, 2, 3], true, spread);
+    assert_eq!(whole.inspect_json("in.gltf")["occupied_texels"], 64);
+}
+#[test]
+fn sparse_elements_left_out_of_a_view_less_accessor_read_as_zero() {
+    // One corner keeps its UV and the others collapse on (0, 0), so a different region is used.
+    let f = sparse_uvs(5123, &[2], false, |_| [0.5, 0.5]);
+    let report = f.inspect_json("in.gltf");
+    let occupied = report["occupied_texels"].as_u64().unwrap();
+    assert!(occupied > 0 && occupied != 24, "{occupied}");
+}
+#[test]
+fn invalid_sparse_accessors_are_errors() {
+    for indices in [&[1, 1][..], &[2, 1], &[0, 4], &[0, 1, 2, 3, 3]] {
+        let f = sparse_uvs(5123, indices, true, |uv| uv);
+        let out = f.run(&["inspect"], "in.gltf");
+        assert!(!out.status.success(), "{indices:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("Sparse") || stderr.contains("sparse"),
+            "{stderr}"
+        );
+    }
+    let f = sparse_uvs(5126, &[0], true, |uv| uv);
+    let out = f.run(&["inspect"], "in.gltf");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("unsigned integers"));
+    assert!(!out.status.success());
+}
+#[test]
+fn accessors_without_data_read_as_zeros() {
+    // The spec's rule, without a Draco extension in the way: every corner lands on one spot.
+    let f = imported_gltf(|root| {
+        let uvs: Vec<_> = root["meshes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| {
+                m["primitives"][0]["attributes"]["TEXCOORD_0"]
+                    .as_u64()
+                    .unwrap() as usize
+            })
+            .collect();
+        for uv in uvs {
+            let accessor = root["accessors"][uv].as_object_mut().unwrap();
+            accessor.remove("bufferView");
+            accessor.remove("byteOffset");
+        }
+    });
+    // Linear filtering around (0, 0) reads one texel in each corner of the wrapping texture.
+    assert_eq!(f.inspect_json("in.gltf")["occupied_texels"], 4);
+}

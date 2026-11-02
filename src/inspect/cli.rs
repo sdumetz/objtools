@@ -36,5 +36,5 @@ pub fn run(args: impl Iterator<Item = String>) -> Res<()> {
     })
 }
 fn help() {
-    println!("Usage: objtools inspect [OPTIONS] <file.gltf|file.obj|file.wrl|file.vrml>\n\nReport the vertex and face counts, diffuse texel count and texture occupancy of a\nmodel. OBJ and VRML are imported into a temporary workspace first, so the figures are\nthose of the glTF that `objtools import` would write.\n\n      --tmp-dir DIR  Workspace for the import and coverage maps (default: input directory)\n      --keep-tmp     Keep the workspace for debugging\n      --json         Print the statistics as JSON; the structure may still change\n      --progress     Report progress on stderr\n  -h, --help         Show help");
+    println!("Usage: objtools inspect [OPTIONS] <file.gltf|file.glb|file.obj|file.wrl|file.vrml>\n\nReport the vertex and face counts, diffuse texel count and texture occupancy of a\nmodel. OBJ and VRML are imported into a temporary workspace first, so the figures are\nthose of the glTF that `objtools import` would write.\n\n      --tmp-dir DIR  Workspace for the import and coverage maps (default: input directory)\n      --keep-tmp     Keep the workspace for debugging\n      --json         Print the statistics as JSON; the structure may still change\n      --progress     Report progress on stderr\n  -h, --help         Show help");
 }

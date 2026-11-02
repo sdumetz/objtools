@@ -1,19 +1,18 @@
-//! Model statistics, read from glTF. OBJ and VRML are first imported into a private workspace,
+//! Model statistics, read from glTF or GLB. OBJ and VRML are first imported into a private workspace,
 //! so every input reports exactly what `objtools import` would produce.
 pub mod cli;
 mod coverage;
-mod extensions;
 mod measure;
 mod report;
 
 use crate::{
     import,
-    shared::{disk::Workspace, Res},
+    shared::{
+        disk::{parent, Workspace},
+        Res,
+    },
 };
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use std::{fs, path::PathBuf};
 pub struct Options {
     pub input: PathBuf,
     pub tmp_dir: Option<PathBuf>,
@@ -22,11 +21,6 @@ pub struct Options {
     /// Print the report as JSON rather than pretty-printed.
     pub json: bool,
 }
-fn parent(path: &Path) -> &Path {
-    path.parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."))
-}
 pub fn run(opts: Options) -> Res<()> {
     let ext = opts
         .input
@@ -34,7 +28,7 @@ pub fn run(opts: Options) -> Res<()> {
         .and_then(|s| s.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
-    if !matches!(ext.as_str(), "gltf" | "obj" | "wrl" | "vrml") {
+    if !matches!(ext.as_str(), "gltf" | "glb" | "obj" | "wrl" | "vrml") {
         return Err(format!("Unsupported input format: .{ext}").into());
     }
     if !opts.input.is_file() {
@@ -45,7 +39,7 @@ pub fn run(opts: Options) -> Res<()> {
         .tmp_dir
         .unwrap_or_else(|| parent(&opts.input).to_owned());
     let workspace = Workspace::create(&tmp_dir, opts.keep_tmp)?;
-    let gltf = if ext == "gltf" {
+    let gltf = if matches!(ext.as_str(), "gltf" | "glb") {
         opts.input.clone()
     } else {
         let output = workspace.path.join("model.gltf");

@@ -43,7 +43,7 @@ Use `--convert-images true --image-format png` to preserve alpha when converting
 ## Inspect a model
 
 ```text
-objtools inspect [OPTIONS] <file.gltf|file.obj|file.wrl|file.vrml>
+objtools inspect [OPTIONS] <file.gltf|file.glb|file.obj|file.wrl|file.vrml>
 
     --tmp-dir DIR  Workspace for the import and coverage maps (default: the input's directory)
     --keep-tmp     Preserve the workspace for debugging
@@ -82,7 +82,7 @@ OBJ and VRML inputs are first converted in a private workspace, then measured an
 
 Large figures use SI multipliers (k, M, G, T) with three significant digits. Occupancy excludes lower mipmap levels. Triangles repeating a texture more than 64 times vertically are omitted from occupancy with a warning. The wiki explains the [coverage calculation](https://github.com/sdumetz/objtools/wiki/Texture-occupancy).
 
-Supported glTF inputs use external buffers and images, indexed or non-indexed triangles, strips or fans, float or normalized integer UVs, and the texture's selected `TEXCOORD_n`. Embedded `data:` URIs, `.glb` and sparse accessors are rejected.
+Supported glTF inputs are `.gltf` and `.glb`, with external, embedded or base64 `data:` buffers and images, indexed or non-indexed triangles, strips or fans, float or normalized integer UVs, sparse accessors, and the texture's selected `TEXCOORD_n`. `data:` URIs are decoded into the workspace, but their text is held in memory while the JSON is parsed, so very large models are better stored in external or GLB buffers.
 
 Textures using `KHR_texture_basisu`, `EXT_texture_webp` or `EXT_texture_avif` are measured from the extension's image rather than its fallback, and only their headers are read. A file that requires an extension `inspect` doesn't support is rejected, which includes Draco and meshopt compression. Optional compression is skipped when the file also has uncompressed data, and any other unknown optional extension is ignored with a warning.
 

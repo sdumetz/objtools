@@ -32,6 +32,12 @@ impl Drop for Workspace {
         }
     }
 }
+/// A file's directory, usable even when the path is a bare file name.
+pub fn parent(path: &Path) -> &Path {
+    path.parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."))
+}
 /// Map a finished file read-only. Its pages are file-backed page cache: they stay resident
 /// while RAM is free and are evicted, not swapped, under memory pressure.
 pub fn map(path: &Path) -> Res<Mmap> {
