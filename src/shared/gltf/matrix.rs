@@ -1,8 +1,6 @@
 //! Node and instance transforms. Column-major, like glTF's own `matrix`.
-use crate::shared::{
-    gltf::{index, Accessor, Gltf},
-    Res,
-};
+use super::{index, Accessor, Gltf};
+use crate::shared::Res;
 use serde_json::Value;
 pub type Matrix = [f64; 16];
 pub const IDENTITY: Matrix = [
@@ -83,7 +81,7 @@ pub fn instancing<'a>(gltf: &'a Gltf, node: &Value) -> Res<Option<Instancing<'a>
         read("SCALE")?,
     ]))
 }
-/// How many instances a node's attributes describe, which `verify` has checked they agree on.
+/// How many instances a node's attributes describe, which `import` has checked they agree on.
 pub fn instance_count(attributes: &Instancing) -> usize {
     attributes
         .iter()

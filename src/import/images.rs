@@ -1,6 +1,6 @@
 //! Source image policy and optional decoding/encoding, one image at a time.
 use super::material::Material;
-use crate::shared::{disk::parent, Res};
+use crate::shared::{disk::parent, gltf::uri, Res};
 use std::{
     collections::{HashMap, HashSet},
     fs::{self, File},
@@ -213,7 +213,7 @@ pub fn prepare_gltf_image(
     };
     check_gltf_image(&content, checked).map_err(|e| label(&e))?;
     let uri = if copy {
-        super::gltf::uri(&name)
+        uri(&name)
     } else {
         relative_uri(
             &fs::canonicalize(image.path)?,
@@ -272,7 +272,7 @@ fn relative_uri(source: &Path, destination: &Path) -> Res<String> {
     let mut parts = vec!["..".to_owned(); from.len() - common];
     for component in &to[common..] {
         if let Component::Normal(name) = component {
-            parts.push(super::gltf::uri(&name.to_string_lossy()));
+            parts.push(uri(&name.to_string_lossy()));
         }
     }
     Ok(parts.join("/"))
@@ -343,7 +343,7 @@ pub fn prepare(
         };
         check_image(&content).map_err(|e| format!("Texture {}: {e}", source.display()))?;
         let uri = if copy {
-            super::gltf::uri(&name)
+            uri(&name)
         } else {
             relative_uri(&source, &destination)?
         };

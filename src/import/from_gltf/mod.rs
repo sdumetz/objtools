@@ -42,17 +42,17 @@
 //! Material variants aren't supported. `KHR_materials_variants` is dropped with a warning: each
 //! primitive keeps its default material, and what only the variants use goes with them.
 mod fix;
-mod matrix;
 mod omit;
 mod payload;
 mod place;
 mod verify;
 
-use super::{
-    gltf::{create, uri, Outputs, COORDINATE_CONVENTION},
-    Options,
+use super::{gltf::COORDINATE_CONVENTION, Options};
+use crate::shared::{
+    disk::{parent, Outputs},
+    gltf::{uri, Gltf},
+    Res,
 };
-use crate::shared::{disk::parent, gltf::Gltf, Res};
 use payload::{Patches, Payload};
 use serde_json::{json, Value};
 use std::{
@@ -158,15 +158,15 @@ pub fn convert(opts: &Options, workspace: &std::path::Path) -> Res<()> {
     let convert_all = opts.images.convert == Some(true);
     let mut textures = omit::unused_textures(&mut materials.output, &model.textures, convert_all)?;
     let (images, plans) = fix::plan_images(&gltf, &mut textures, opts, workspace)?;
-    let mut outputs = Outputs::new();
+    let mut outputs = Outputs::default();
     for plan in &plans {
         if let Some(name) = &plan.publish_name {
-            let mut dst = create(&parent(&opts.output).join(name), &mut outputs)?;
+            let mut dst = outputs.create(&parent(&opts.output).join(name))?;
             std::io::copy(&mut File::open(&plan.content)?, &mut dst)?;
         }
     }
     let bin_path = opts.output.with_extension("bin");
-    let mut dst = BufWriter::new(create(&bin_path, &mut outputs)?);
+    let mut dst = BufWriter::new(outputs.create(&bin_path)?);
     std::io::copy(&mut File::open(&spool)?, &mut dst)?;
     dst.flush()?;
     drop(dst);
@@ -209,11 +209,11 @@ pub fn convert(opts: &Options, workspace: &std::path::Path) -> Res<()> {
         map.remove("samplers");
     }
     fix::extension_lists(&mut root, &declared, &required);
-    let mut dst = BufWriter::new(create(&opts.output, &mut outputs)?);
+    let mut dst = BufWriter::new(outputs.create(&opts.output)?);
     serde_json::to_writer_pretty(&mut dst, &root)?;
     dst.flush()?;
     drop(dst);
-    outputs.committed = true;
+    outputs.commit();
     if !opts.quiet {
         eprintln!(
             "Wrote {} ({} faces, {mesh_count} meshes, {} bytes of geometry)",

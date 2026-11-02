@@ -1,17 +1,20 @@
 //! `--center` and `--up-axis`: where the model ends up, and what the output records about it.
 use super::{
     fix::{Geometry, PositionRange},
-    matrix::{
-        apply, instance_count, instance_matrix, instancing, local_matrix, multiply, numbers, trs,
-        IDENTITY,
-    },
     payload::{Output, Patches},
     Model, Options,
 };
 use crate::{
     import::fixed::{format_fixed_as_decimal, format_triple, parse_decimal_fixed, BBox, SCALE},
     shared::{
-        gltf::{index, Accessor, Gltf},
+        gltf::{
+            index,
+            matrix::{
+                apply, instance_count, instance_matrix, instancing, local_matrix, multiply,
+                numbers, trs, IDENTITY,
+            },
+            Accessor, Gltf,
+        },
         Res,
     },
 };

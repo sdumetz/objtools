@@ -5,11 +5,15 @@ use super::{
     obj::{self, Scene},
     triangulate,
 };
-use crate::shared::{disk::map, Res};
+use crate::shared::{
+    disk::{map, Outputs},
+    gltf::uri,
+    Res,
+};
 use serde_json::{json, Value};
 use std::{
     collections::{BTreeSet, HashMap},
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io::{BufReader, BufWriter, Read, Write},
     path::{Path, PathBuf},
 };
@@ -154,46 +158,6 @@ impl Document {
         Ok(())
     }
 }
-/// URI path component escaping (not filesystem escaping).
-pub fn uri(name: &str) -> String {
-    let mut out = String::new();
-    for b in name.bytes() {
-        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
-            out.push(b as char);
-        } else {
-            out.push_str(&format!("%{b:02X}"));
-        }
-    }
-    out
-}
-// Track published paths so an error removes incomplete output, without touching existing files.
-pub struct Outputs {
-    paths: Vec<PathBuf>,
-    pub committed: bool,
-}
-impl Outputs {
-    pub fn new() -> Self {
-        Self {
-            paths: Vec::new(),
-            committed: false,
-        }
-    }
-}
-impl Drop for Outputs {
-    fn drop(&mut self) {
-        if !self.committed {
-            for p in &self.paths {
-                let _ = fs::remove_file(p);
-            }
-        }
-    }
-}
-pub fn create(path: &Path, outputs: &mut Outputs) -> Res<File> {
-    let f = OpenOptions::new().write(true).create_new(true).open(path)?;
-    outputs.paths.push(path.to_owned());
-    Ok(f)
-}
-
 pub fn write(scene: Scene, dir: &Path, options: &super::Options) -> Res<()> {
     write_with_limit(scene, dir, options, MAX_VERTICES)
 }
@@ -444,7 +408,7 @@ fn write_with_limit(
     if !center && !quiet {
         eprintln!("Note: coordinates were encoded as float32 without recentering; use --center for georeferenced assets");
     }
-    let mut outputs = Outputs::new();
+    let mut outputs = Outputs::default();
     let parent = output
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -490,7 +454,7 @@ fn write_with_limit(
                 Some(id) => *id,
                 None => {
                     if let Some(name) = &plan.publish_name {
-                        let mut dst = create(&parent.join(name), &mut outputs)?;
+                        let mut dst = outputs.create(&parent.join(name))?;
                         std::io::copy(&mut File::open(&plan.content)?, &mut dst)?;
                     }
                     images.push(json!({"uri":plan.uri}));
@@ -569,15 +533,15 @@ fn write_with_limit(
         root["textures"] = json!(textures);
         root["samplers"] = json!(samplers);
     }
-    let mut dst = BufWriter::new(create(&bin_path, &mut outputs)?);
+    let mut dst = BufWriter::new(outputs.create(&bin_path)?);
     std::io::copy(&mut File::open(bin_spool)?, &mut dst)?;
     dst.flush()?;
     drop(dst);
-    let mut dst = BufWriter::new(create(output, &mut outputs)?);
+    let mut dst = BufWriter::new(outputs.create(output)?);
     serde_json::to_writer_pretty(&mut dst, &root)?;
     dst.flush()?;
     drop(dst);
-    outputs.committed = true;
+    outputs.commit();
     if !quiet {
         eprintln!(
             "Wrote {} ({face_count} faces, {} meshes, {} bytes of geometry)",

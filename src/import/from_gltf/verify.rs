@@ -1,10 +1,10 @@
 //! Checks on the input. Nothing here changes anything: each function either passes or stops the
 //! import before a file is written, except where it says it only warns.
-use super::{fix::Materials, matrix::instancing, place::Previous, Model};
+use super::{fix::Materials, place::Previous, Model};
 use crate::{
     import::gltf::MAX_VERTICES,
     shared::{
-        gltf::{element, extensions, index, Accessor, Gltf},
+        gltf::{element, extensions, index, matrix::instancing, Accessor, Gltf},
         Res,
     },
 };

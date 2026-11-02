@@ -3,6 +3,7 @@
 mod accessor;
 mod data_uri;
 pub mod extensions;
+pub mod matrix;
 
 use super::{
     disk::{map, parent},
@@ -49,7 +50,19 @@ pub fn container_size(reader: impl BufRead + Seek) -> Option<(u32, u32)> {
     let size = (size.width.try_into().ok()?, size.height.try_into().ok()?);
     (size.0 > 0 && size.1 > 0).then_some(size)
 }
-/// Undo URI path escaping; `gltf::uri` writes `%XX` for every byte outside the unreserved set.
+/// URI path component escaping (not filesystem escaping).
+pub fn uri(name: &str) -> String {
+    let mut out = String::new();
+    for b in name.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+/// Undo URI path escaping; `uri` writes `%XX` for every byte outside the unreserved set.
 fn decode_uri(uri: &str) -> Res<PathBuf> {
     let bytes = uri.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());

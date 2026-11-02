@@ -2,7 +2,7 @@
 use super::Res;
 use memmap2::Mmap;
 use std::{
-    fs::{self, File},
+    fs::{self, File, OpenOptions},
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -37,6 +37,31 @@ pub fn parent(path: &Path) -> &Path {
     path.parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."))
+}
+/// Tracks published paths so an error removes incomplete output, without touching existing files.
+#[derive(Default)]
+pub struct Outputs {
+    paths: Vec<PathBuf>,
+    committed: bool,
+}
+impl Outputs {
+    pub fn create(&mut self, path: &Path) -> Res<File> {
+        let f = OpenOptions::new().write(true).create_new(true).open(path)?;
+        self.paths.push(path.to_owned());
+        Ok(f)
+    }
+    pub fn commit(&mut self) {
+        self.committed = true;
+    }
+}
+impl Drop for Outputs {
+    fn drop(&mut self) {
+        if !self.committed {
+            for p in &self.paths {
+                let _ = fs::remove_file(p);
+            }
+        }
+    }
 }
 /// Map a finished file read-only. Its pages are file-backed page cache: they stay resident
 /// while RAM is free and are evicted, not swapped, under memory pressure.
