@@ -207,3 +207,215 @@ fn texture_transform_is_applied_as_renderers_sample() {
     );
     assert_eq!(f.inspect("moved.obj"), f.inspect("baked.obj"));
 }
+/// `half_textured` imported to `in.gltf`, then edited: the quad on an 8x8 `source.png`.
+fn imported_gltf(edit: impl FnOnce(&mut Value)) -> Fixture {
+    let f = half_textured("source.png");
+    assert!(f.run(&["import"], "in.obj").status.success());
+    let mut root: Value = serde_json::from_slice(&fs::read(f.0.join("in.gltf")).unwrap()).unwrap();
+    edit(&mut root);
+    f.file("in.gltf", &root.to_string());
+    f
+}
+/// A KTX2 header: identifier, vkFormat, typeSize, then the size. Nothing past it is read.
+fn ktx2(width: u32, height: u32) -> Vec<u8> {
+    let mut out = b"\xabKTX 20\xbb\r\n\x1a\n".to_vec();
+    for field in [0, 1, width, height] {
+        out.extend(field.to_le_bytes());
+    }
+    out
+}
+/// The AVIF boxes leading to the image size: ftyp, then meta > iprp > ipco > ispe.
+fn avif(width: u32, height: u32) -> Vec<u8> {
+    let boxed = |tag: &[u8; 4], body: &[u8]| {
+        let mut out = (body.len() as u32 + 8).to_be_bytes().to_vec();
+        out.extend(tag);
+        out.extend(body);
+        out
+    };
+    let mut ispe = vec![0; 4];
+    ispe.extend(width.to_be_bytes());
+    ispe.extend(height.to_be_bytes());
+    let mut meta = vec![0; 4];
+    meta.extend(boxed(b"iprp", &boxed(b"ipco", &boxed(b"ispe", &ispe))));
+    let mut out = boxed(b"ftyp", b"avif\0\0\0\0avif");
+    out.extend(boxed(b"meta", &meta));
+    out
+}
+/// The two statistics an image's size decides, for the same UVs.
+fn texels(report: &Value) -> (&Value, &Value) {
+    (&report["diffuse_texels"], &report["textures"][0]["name"])
+}
+#[test]
+fn extension_images_replace_their_fallback() {
+    for (extension, name, bytes) in [
+        ("KHR_texture_basisu", "extra.ktx2", ktx2(16, 16)),
+        ("EXT_texture_avif", "extra.avif", avif(16, 16)),
+    ] {
+        for fallback in [true, false] {
+            let f = imported_gltf(|root| {
+                root["images"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({"uri": name}));
+                let texture = &mut root["textures"][0];
+                texture["extensions"] = json!({extension: {"source": 1}});
+                if !fallback {
+                    texture.as_object_mut().unwrap().remove("source");
+                }
+                root["extensionsUsed"] = json!([extension]);
+            });
+            fs::write(f.0.join(name), &bytes).unwrap();
+            let report = f.inspect_json("in.gltf");
+            assert_eq!(texels(&report), (&json!(256), &json!(name)), "{extension}");
+            assert_eq!(report["textures"][0]["occupied_texels"], 60, "{extension}");
+        }
+    }
+}
+#[test]
+fn webp_extension_image_replaces_its_fallback() {
+    let f = imported_gltf(|root| {
+        root["images"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"uri": "extra.webp"}));
+        root["textures"][0]["extensions"] = json!({"EXT_texture_webp": {"source": 1}});
+        root["extensionsUsed"] = json!(["EXT_texture_webp"]);
+    });
+    image::RgbImage::new(16, 16)
+        .save(f.0.join("extra.webp"))
+        .unwrap();
+    let report = f.inspect_json("in.gltf");
+    assert_eq!(texels(&report), (&json!(256), &json!("extra.webp")));
+}
+#[test]
+fn texture_extensions_follow_the_order_of_three_js() {
+    let f = imported_gltf(|root| {
+        let images = root["images"].as_array_mut().unwrap();
+        images.push(json!({"uri": "extra.ktx2"}));
+        images.push(json!({"uri": "extra.avif"}));
+        root["textures"][0]["extensions"] = json!({
+            "EXT_texture_avif": {"source": 2},
+            "KHR_texture_basisu": {"source": 1},
+        });
+    });
+    fs::write(f.0.join("extra.ktx2"), ktx2(16, 16)).unwrap();
+    fs::write(f.0.join("extra.avif"), avif(32, 32)).unwrap();
+    assert_eq!(
+        f.inspect_json("in.gltf")["textures"][0]["name"],
+        "extra.ktx2"
+    );
+}
+#[test]
+fn container_sizes_are_read_from_buffer_views() {
+    for (mime, bytes) in [("image/ktx2", ktx2(16, 4)), ("image/avif", avif(16, 4))] {
+        let mut length = 0;
+        let f = imported_gltf(|root| {
+            length = root["buffers"][0]["byteLength"].as_u64().unwrap();
+            let view = root["bufferViews"].as_array().unwrap().len();
+            root["bufferViews"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"buffer": 0, "byteOffset": length, "byteLength": bytes.len()}));
+            root["buffers"][0]["byteLength"] = json!(length + bytes.len() as u64);
+            root["images"] = json!([{"bufferView": view, "mimeType": mime}]);
+        });
+        let mut bin = fs::read(f.0.join("in.bin")).unwrap();
+        assert_eq!(bin.len() as u64, length);
+        bin.extend(&bytes);
+        fs::write(f.0.join("in.bin"), bin).unwrap();
+        let report = f.inspect_json("in.gltf");
+        assert_eq!(report["textures"][0]["width"], 16, "{mime}");
+        assert_eq!(report["textures"][0]["height"], 4, "{mime}");
+    }
+}
+#[test]
+fn a_container_without_a_2d_size_is_an_error() {
+    let f = imported_gltf(|root| root["images"] = json!([{"uri": "line.ktx2"}]));
+    fs::write(f.0.join("line.ktx2"), ktx2(16, 0)).unwrap();
+    let out = f.run(&["inspect"], "in.gltf");
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("line.ktx2"));
+}
+#[test]
+fn unsupported_required_extensions_are_errors() {
+    for name in [
+        "VENDOR_made_up",
+        "KHR_draco_mesh_compression",
+        "EXT_meshopt_compression",
+        "KHR_meshopt_compression",
+    ] {
+        let f = imported_gltf(|root| {
+            root["extensionsUsed"] = json!([name]);
+            root["extensionsRequired"] = json!([name]);
+        });
+        let out = f.run(&["inspect"], "in.gltf");
+        assert!(!out.status.success(), "{name}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains(name), "{stderr}");
+    }
+}
+#[test]
+fn supported_required_extensions_are_accepted() {
+    let f = imported_gltf(|root| {
+        let names = ["KHR_mesh_quantization", "EXT_mesh_gpu_instancing"];
+        root["extensionsUsed"] = json!(names);
+        root["extensionsRequired"] = json!(names);
+    });
+    let out = f.run(&["inspect"], "in.gltf");
+    assert!(out.status.success());
+    assert!(
+        out.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+#[test]
+fn unknown_optional_extensions_warn_once_and_change_nothing() {
+    let f = imported_gltf(|root| {
+        root["extensionsUsed"] = json!(["VENDOR_one", "KHR_materials_ior", "VENDOR_two"]);
+    });
+    let out = f.run(&["inspect", "--json"], "in.gltf");
+    assert!(out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        stderr,
+        "Warning: ignored 2 unsupported extensions: VENDOR_one, VENDOR_two\n"
+    );
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["occupied_texels"], 24);
+}
+#[test]
+fn optional_draco_uses_uncompressed_data_or_is_an_error() {
+    let draco = |root: &mut Value| {
+        root["extensionsUsed"] = json!(["KHR_draco_mesh_compression"]);
+        for mesh in root["meshes"].as_array_mut().unwrap() {
+            for primitive in mesh["primitives"].as_array_mut().unwrap() {
+                primitive["extensions"] = json!({"KHR_draco_mesh_compression": {
+                    "bufferView": 0,
+                    "attributes": {"POSITION": 0, "TEXCOORD_0": 1},
+                }});
+            }
+        }
+    };
+    let f = imported_gltf(draco);
+    let out = f.run(&["inspect", "--json"], "in.gltf");
+    assert!(out.status.success());
+    assert!(
+        out.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["occupied_texels"], 24);
+
+    let f = imported_gltf(|root| {
+        draco(root);
+        for accessor in root["accessors"].as_array_mut().unwrap() {
+            accessor.as_object_mut().unwrap().remove("bufferView");
+        }
+    });
+    let out = f.run(&["inspect"], "in.gltf");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("KHR_draco_mesh_compression"), "{stderr}");
+}

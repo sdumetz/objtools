@@ -84,6 +84,8 @@ Large figures use SI multipliers (k, M, G, T) with three significant digits. Occ
 
 Supported glTF inputs use external buffers and images, indexed or non-indexed triangles, strips or fans, float or normalized integer UVs, and the texture's selected `TEXCOORD_n`. Embedded `data:` URIs, `.glb` and sparse accessors are rejected.
 
+Textures using `KHR_texture_basisu`, `EXT_texture_webp` or `EXT_texture_avif` are measured from the extension's image rather than its fallback, and only their headers are read. A file that requires an extension `inspect` doesn't support is rejected, which includes Draco and meshopt compression. Optional compression is skipped when the file also has uncompressed data, and any other unknown optional extension is ignored with a warning.
+
 ## Working with large or georeferenced models
 
 - Keep the workspace on a real disk with ample free space. It defaults to the output directory for `import` and the input directory for `inspect`; use `--tmp-dir` to choose another location. An SSD helps with large imports. Temporary files are cleaned up automatically.

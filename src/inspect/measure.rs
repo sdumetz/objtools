@@ -2,7 +2,7 @@
 //! files: nothing whole-model is held on the heap.
 use super::{
     coverage::{Coverage, Filter, Wrap},
-    parent,
+    extensions, parent,
     report::{Report, TextureReport},
 };
 use crate::shared::{disk::map, format::fmt_count, Res};
@@ -11,7 +11,7 @@ use serde_json::Value;
 use std::{
     collections::{btree_map::Entry, BTreeMap, HashSet},
     fs::{self, File},
-    io::{BufReader, Cursor},
+    io::{BufRead, BufReader, Cursor, Seek},
     path::{Component, Path, PathBuf},
 };
 struct Texture {
@@ -190,6 +190,13 @@ fn relative(path: &Path, base: &Path) -> PathBuf {
     let up = std::iter::repeat_n(Component::ParentDir, from.len() - common);
     up.chain(to[common..].iter().copied()).collect()
 }
+/// KTX2 and AVIF sizes, read from the container: the `image` crate can't open either format
+/// without a decoder. `None` for any other format, or for a container without a 2D size.
+fn container_size(reader: impl BufRead + Seek) -> Option<(u32, u32)> {
+    let size = imagesize::reader_size(reader).ok()?;
+    let size = (size.width.try_into().ok()?, size.height.try_into().ok()?);
+    (size.0 > 0 && size.1 > 0).then_some(size)
+}
 /// Width and height from the image header, without decoding pixels.
 fn dimensions(
     root: &Value,
@@ -202,6 +209,9 @@ fn dimensions(
     if let Some(uri) = image["uri"].as_str() {
         let path = base.join(decode_uri(uri)?);
         let (width, height) = (|| -> Res<_> {
+            if let Some(size) = container_size(BufReader::new(File::open(&path)?)) {
+                return Ok(size);
+            }
             Ok(image::ImageReader::open(&path)?
                 .with_guessed_format()?
                 .into_dimensions()?)
@@ -211,9 +221,12 @@ fn dimensions(
         return Ok((name.display().to_string(), width, height));
     }
     let (bytes, _) = view(root, buffers, index(&image["bufferView"], "bufferView")?)?;
-    let (width, height) = image::ImageReader::new(Cursor::new(bytes))
-        .with_guessed_format()?
-        .into_dimensions()?;
+    let (width, height) = match container_size(Cursor::new(bytes)) {
+        Some(size) => size,
+        None => image::ImageReader::new(Cursor::new(bytes))
+            .with_guessed_format()?
+            .into_dimensions()?,
+    };
     let name = image["name"]
         .as_str()
         .map_or(format!("image {id}"), str::to_owned);
@@ -224,6 +237,7 @@ fn dimensions(
 pub fn measure(path: &Path, display_base: &Path, workspace: &Path, progress: bool) -> Res<Report> {
     let root: Value = serde_json::from_reader(BufReader::new(File::open(path)?))
         .map_err(|e| format!("{}: {e}", path.display()))?;
+    extensions::check(&root)?;
     let base = parent(path);
     let mut buffers = Vec::new();
     for buffer in root["buffers"].as_array().into_iter().flatten() {
@@ -245,7 +259,7 @@ pub fn measure(path: &Path, display_base: &Path, workspace: &Path, progress: boo
             continue;
         }
         let texture = element(&root, "textures", index(&info["index"], "texture")?)?;
-        let image = index(&texture["source"], "texture source image")?;
+        let image = extensions::texture_source(texture)?;
         if let Entry::Vacant(slot) = textures.entry(image) {
             let (name, width, height) = dimensions(&root, base, &buffers, image, display_base)?;
             let file = workspace.join(format!("coverage-{image}"));
@@ -265,6 +279,7 @@ pub fn measure(path: &Path, display_base: &Path, workspace: &Path, progress: boo
     let mut skipped = 0u64;
     let meshes = root["meshes"].as_array().into_iter().flatten();
     for primitive in meshes.flat_map(|m| m["primitives"].as_array().into_iter().flatten()) {
+        extensions::check_primitive(&root, primitive)?;
         let attributes = &primitive["attributes"];
         let position = index(&attributes["POSITION"], "POSITION accessor")?;
         let count = index(&element(&root, "accessors", position)?["count"], "count")?;
@@ -309,7 +324,7 @@ pub fn measure(path: &Path, display_base: &Path, workspace: &Path, progress: boo
             }
             None => ([Wrap::Repeat; 2], Filter::Linear),
         };
-        let image = index(&texture["source"], "texture source image")?;
+        let image = extensions::texture_source(texture)?;
         let target = &mut textures.get_mut(&image).unwrap().coverage;
         let set = transform
             .tex_coord

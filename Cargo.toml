@@ -11,6 +11,7 @@ serde_json = "1"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "bmp", "tga", "tiff", "webp", "gif", "pnm", "hdr", "dds", "ico", "qoi", "exr"] }
 memmap2 = "0.9"
 png = "0.18"
+imagesize = { version = "0.15", default-features = false, features = ["ktx2", "heif"] }
 
 [profile.release]
 lto = true

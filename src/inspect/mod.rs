@@ -2,6 +2,7 @@
 //! so every input reports exactly what `objtools import` would produce.
 pub mod cli;
 mod coverage;
+mod extensions;
 mod measure;
 mod report;
 
