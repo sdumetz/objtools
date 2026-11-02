@@ -2,6 +2,7 @@
 pub mod cli;
 mod dedup;
 mod fixed;
+mod from_gltf;
 mod gltf;
 mod group;
 pub mod images;
@@ -35,7 +36,7 @@ pub fn run(opts: Options) -> Res<()> {
         .and_then(|s| s.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
-    if !matches!(ext.as_str(), "obj" | "wrl" | "vrml") {
+    if !matches!(ext.as_str(), "obj" | "wrl" | "vrml" | "gltf" | "glb") {
         return Err(format!("Unsupported input format: .{ext}").into());
     }
     if opts.output.extension().and_then(|s| s.to_str()) != Some("gltf") {
@@ -45,6 +46,9 @@ pub fn run(opts: Options) -> Res<()> {
         return Err("Output .gltf or .bin already exists; choose a new output path".into());
     }
     let workspace = Workspace::create(&opts.tmp_dir, opts.keep_tmp)?;
+    if matches!(ext.as_str(), "gltf" | "glb") {
+        return from_gltf::convert(&opts, &workspace.path);
+    }
     let source = if ext == "obj" {
         opts.input.clone()
     } else {

@@ -1,6 +1,6 @@
 # objtools
 
-A Rust command-line tool for converting very large OBJ and VRML meshes to glTF 2.0 and inspecting model statistics. It handles georeferenced coordinates and models [larger than available RAM](https://github.com/sdumetz/objtools/wiki/Resource-usage-comparison), using a disk workspace.
+A Rust command-line tool for converting very large OBJ, VRML and glTF meshes to glTF 2.0 and inspecting model statistics. It handles georeferenced coordinates and models [larger than available RAM](https://github.com/sdumetz/objtools/wiki/Resource-usage-comparison), using a disk workspace.
 
 ## Install
 Download a binary from latest [release](https://github.com/sdumetz/objtools/releases) or install from a repository checkout with [Rust and Cargo](https://www.rust-lang.org/tools/install):
@@ -20,7 +20,7 @@ objtools import terrain.wrl --center --up-axis z -o terrain.gltf
 An import writes a `.gltf` file, a sibling `.bin` geometry buffer and any copied or converted textures. By default, the output uses the input's name with a `.gltf` extension. The destination directory must already exist; existing output files are never overwritten. A failed import removes only output files it created.
 
 ```text
-objtools import [OPTIONS] <file.obj|file.wrl|file.vrml>
+objtools import [OPTIONS] <file.obj|file.wrl|file.vrml|file.gltf|file.glb>
 
 -o, --output FILE  Destination .gltf (default: input with .gltf extension)
     --center       Subtract the whole-input bounding-box center
@@ -31,7 +31,7 @@ objtools import [OPTIONS] <file.obj|file.wrl|file.vrml>
     --convert-images BOOL  auto (default), true or false
     --image-format FORMAT  jpg (default) or png
     --image-quality N      JPEG quality 1..100 (default 95)
-    --no-color     Drop OBJ vertex colors
+    --no-color     Drop vertex colors
     --progress     Report reading and conversion progress on stderr
 -h, --help         Show help
 ```
@@ -39,6 +39,18 @@ objtools import [OPTIONS] <file.obj|file.wrl|file.vrml>
 Textures stay in place when input and output share a folder and no conversion is needed; otherwise they are copied. JPG and PNG are kept without conversion by default; other supported formats are converted. Source images are never modified.
 
 Use `--convert-images true --image-format png` to preserve alpha when converting textures. JPEG conversion composites transparent pixels onto white.
+
+### glTF and GLB input
+
+A glTF or GLB is rewritten rather than rebuilt: nodes, skins, animations, morph targets, materials and supported extensions are kept, and attributes keep their encoding, interleaving and sharing. GLB and `data:` content is unpacked into the `.bin` and image files.
+
+The same checks apply as for other inputs. Non-finite values and out-of-range indices are errors, zero-area faces are skipped, strips and fans become triangle lists, points and lines are omitted, float normals are normalized, and a `mimeType` that contradicts the image's content is corrected with a warning. Rules that only make sense for OBJ don't apply: V isn't flipped, normals aren't generated, `alphaMode` isn't inferred and `COLOR_0` isn't renamed.
+
+- `--center` subtracts the center from the positions when every mesh is at the world origin. Otherwise, including with skins, animation, instancing or quantized positions, a new parent node above the scene roots carries the translation. Re-importing adds to any origin an earlier import recorded.
+- `--up-axis z` rotates in a new parent node above the scene roots.
+- WebP, AVIF and KTX2 images stay under their extensions. `--convert-images true` converts WebP, and is an error for AVIF and KTX2, which this build can't decode.
+- A file requiring an unsupported extension is rejected, including Draco and meshopt compression. Optional compression is dropped when the file also has uncompressed data, and other unknown extensions are dropped with a warning.
+- Material variants (`KHR_materials_variants`) aren't supported. A warning says so, each primitive keeps its default material, and the materials and images only the variants use are dropped.
 
 ## Inspect a model
 
@@ -84,7 +96,7 @@ Large figures use SI multipliers (k, M, G, T) with three significant digits. Occ
 
 Supported glTF inputs are `.gltf` and `.glb`, with external, embedded or base64 `data:` buffers and images, indexed or non-indexed triangles, strips or fans, float or normalized integer UVs, sparse accessors, and the texture's selected `TEXCOORD_n`. `data:` URIs are decoded into the workspace, but their text is held in memory while the JSON is parsed, so very large models are better stored in external or GLB buffers.
 
-Textures using `KHR_texture_basisu`, `EXT_texture_webp` or `EXT_texture_avif` are measured from the extension's image rather than its fallback, and only their headers are read. A file that requires an extension `inspect` doesn't support is rejected, which includes Draco and meshopt compression. Optional compression is skipped when the file also has uncompressed data, and any other unknown optional extension is ignored with a warning.
+Textures using `KHR_texture_basisu`, `EXT_texture_webp` or `EXT_texture_avif` are measured from the extension's image rather than its fallback, and only their headers are read. A file that requires an extension `inspect` doesn't support is rejected, which includes Draco and meshopt compression. Optional compression is skipped when the file also has uncompressed data, and any other unknown optional extension is ignored with a warning. Material variants (`KHR_materials_variants`) aren't supported, and a warning says so: occupancy comes only from each primitive's default material, so a texture only the variants use counts as unoccupied.
 
 ## Working with large or georeferenced models
 

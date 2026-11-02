@@ -19,5 +19,5 @@ fn main() -> Res<()> {
     }
 }
 fn help() {
-    println!("Usage: objtools <COMMAND> [OPTIONS] <file>\n\nCommands:\n  import   Convert OBJ or VRML to glTF 2.0 + external .bin\n  inspect  Report vertex, face and diffuse texture statistics\n\nRun objtools <COMMAND> --help for its options.");
+    println!("Usage: objtools <COMMAND> [OPTIONS] <file>\n\nCommands:\n  import   Convert OBJ, VRML, glTF or GLB to glTF 2.0 + external .bin\n  inspect  Report vertex, face and diffuse texture statistics\n\nRun objtools <COMMAND> --help for its options.");
 }

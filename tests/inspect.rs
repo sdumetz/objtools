@@ -385,6 +385,20 @@ fn unknown_optional_extensions_warn_once_and_change_nothing() {
     assert_eq!(report["occupied_texels"], 24);
 }
 #[test]
+fn material_variants_warn_that_only_the_default_material_is_used() {
+    let f = imported_gltf(|root| {
+        root["extensionsUsed"] = json!(["KHR_materials_variants", "VENDOR_one"]);
+    });
+    let out = f.run(&["inspect", "--json"], "in.gltf");
+    assert!(out.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "Warning: material variants are not supported (KHR_materials_variants): \
+         only each primitive's default material is used\n\
+         Warning: ignored 1 unsupported extensions: VENDOR_one\n"
+    );
+}
+#[test]
 fn optional_draco_uses_uncompressed_data_or_is_an_error() {
     let draco = |root: &mut Value| {
         root["extensionsUsed"] = json!(["KHR_draco_mesh_compression"]);

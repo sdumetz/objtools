@@ -1,9 +1,8 @@
-//! Which glTF extensions `inspect` can read, and the texture image they select.
+//! Which glTF extensions can be read, and the texture image they select.
 use crate::shared::Res;
 use serde_json::Value;
-/// Applied by `measure`, or unable to change a statistic: materials only add parameters and
-/// non-base-colour textures, a light adds no geometry, quantized attributes are read like any
-/// others, and an instanced mesh counts once.
+/// Read or carried through by both commands. `inspect` applies the texture extensions and needs
+/// nothing from the others to compute its statistics; `import` keeps them all in its output.
 const SUPPORTED: &[&str] = &[
     "EXT_materials_bump",
     "EXT_mesh_gpu_instancing",
@@ -32,6 +31,18 @@ const COMPRESSION: &[&str] = &[
     "KHR_draco_mesh_compression",
     "KHR_meshopt_compression",
 ];
+/// Not applied: a primitive only ever uses its default material, so the warning says what is lost
+/// instead of only naming the extension.
+const VARIANTS: &str = "KHR_materials_variants";
+/// The texture extensions that select an image, in the order `texture_source` prefers them.
+pub const IMAGE_EXTENSIONS: [&str; 3] =
+    ["KHR_texture_basisu", "EXT_texture_webp", "EXT_texture_avif"];
+pub fn is_supported(name: &str) -> bool {
+    SUPPORTED.contains(&name)
+}
+pub fn is_compression(name: &str) -> bool {
+    COMPRESSION.contains(&name)
+}
 /// A required extension can't be ignored without misreading the file, as the spec says. An
 /// optional one can, so it only warns.
 pub fn check(root: &Value) -> Res<()> {
@@ -47,6 +58,12 @@ pub fn check(root: &Value) -> Res<()> {
     }
     let mut ignored = names("extensionsUsed");
     ignored.retain(|name| !SUPPORTED.contains(name) && !COMPRESSION.contains(name));
+    if ignored.contains(&VARIANTS) {
+        eprintln!(
+            "Warning: material variants are not supported ({VARIANTS}): only each primitive's default material is used"
+        );
+        ignored.retain(|name| *name != VARIANTS);
+    }
     if !ignored.is_empty() {
         eprintln!(
             "Warning: ignored {} unsupported extensions: {}",
@@ -82,7 +99,7 @@ pub fn check_primitive(root: &Value, primitive: &Value) -> Res<()> {
 /// The image a renderer shows for a texture. An extension's image takes precedence over the
 /// `source` fallback, in the order three.js's `GLTFLoader` registers its plugins.
 pub fn texture_source(texture: &Value) -> Res<usize> {
-    let extension = ["KHR_texture_basisu", "EXT_texture_webp", "EXT_texture_avif"]
+    let extension = IMAGE_EXTENSIONS
         .iter()
         .find_map(|name| texture["extensions"][name]["source"].as_u64());
     let image = extension

@@ -13,6 +13,7 @@ use memmap2::Mmap;
 use serde_json::Value;
 use std::{
     collections::BTreeMap,
+    io::{BufRead, Seek},
     ops::Range,
     path::{Path, PathBuf},
 };
@@ -40,6 +41,13 @@ pub fn element<'a>(root: &'a Value, array: &str, i: usize) -> Res<&'a Value> {
     root[array]
         .get(i)
         .ok_or_else(|| format!("{array}[{i}] does not exist").into())
+}
+/// KTX2 and AVIF sizes, read from the container: the `image` crate can't open either format
+/// without a decoder. `None` for any other format, or for a container without a 2D size.
+pub fn container_size(reader: impl BufRead + Seek) -> Option<(u32, u32)> {
+    let size = imagesize::reader_size(reader).ok()?;
+    let size = (size.width.try_into().ok()?, size.height.try_into().ok()?);
+    (size.0 > 0 && size.1 > 0).then_some(size)
 }
 /// Undo URI path escaping; `gltf::uri` writes `%XX` for every byte outside the unreserved set.
 fn decode_uri(uri: &str) -> Res<PathBuf> {

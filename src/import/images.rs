@@ -73,10 +73,190 @@ pub fn parse_convert(s: &str) -> Res<Option<bool>> {
         _ => Err("--convert-images must be auto, true or false".into()),
     }
 }
+/// An image's format, from its content: a glTF names images by URI or embeds them, so a file name
+/// proves nothing.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Kind {
+    Jpeg,
+    Png,
+    Webp,
+    Avif,
+    Ktx2,
+    Other,
+}
+impl Kind {
+    pub fn of(header: &[u8]) -> Self {
+        if header.starts_with(&[0xff, 0xd8]) {
+            Self::Jpeg
+        } else if header.starts_with(b"\x89PNG") {
+            Self::Png
+        } else if header.starts_with(b"\xabKTX 20\xbb\r\n\x1a\n") {
+            Self::Ktx2
+        } else if header.len() >= 12 && header.starts_with(b"RIFF") && &header[8..12] == b"WEBP" {
+            Self::Webp
+        } else if header.len() >= 12 && &header[4..8] == b"ftyp" && avif_brand(header) {
+            Self::Avif
+        } else {
+            Self::Other
+        }
+    }
+    pub fn extension(self) -> Option<&'static str> {
+        match self {
+            Self::Jpeg => Some("jpg"),
+            Self::Png => Some("png"),
+            Self::Webp => Some("webp"),
+            Self::Avif => Some("avif"),
+            Self::Ktx2 => Some("ktx2"),
+            Self::Other => None,
+        }
+    }
+    /// What a glTF's `mimeType` should say, in the terms of the spec and of the extension adding
+    /// the format.
+    fn mime(self) -> Option<&'static str> {
+        match self {
+            Self::Jpeg => Some("image/jpeg"),
+            Self::Png => Some("image/png"),
+            Self::Webp => Some("image/webp"),
+            Self::Avif => Some("image/avif"),
+            Self::Ktx2 => Some("image/ktx2"),
+            Self::Other => None,
+        }
+    }
+}
+/// The `ftyp` box's major brand, or a compatible one after its minor version field.
+fn avif_brand(header: &[u8]) -> bool {
+    let size = u32::from_be_bytes(header[..4].try_into().unwrap()) as usize;
+    let end = size.min(header.len());
+    let is_avif = |brand: &[u8]| brand == b"avif" || brand == b"avis";
+    is_avif(&header[8..12])
+        || header
+            .get(16..end)
+            .is_some_and(|brands| brands.as_chunks::<4>().0.iter().any(|b| is_avif(b)))
+}
+/// An image of a glTF being imported.
+pub struct GltfImage<'a> {
+    pub path: &'a Path,
+    /// It only exists in the workspace, so it has to be published.
+    pub embedded: bool,
+    /// A texture selects it through an extension, which makes its format valid glTF.
+    pub extension: bool,
+}
+/// The plan for one glTF image. Unlike a source texture's, its format can be valid through a
+/// glTF extension, and it is kept then: converting would lose quality for nothing. Only
+/// `--convert-images true` decodes such an image, which this build can't do for AVIF and KTX2.
+pub fn prepare_gltf_image(
+    options: &Options,
+    image: &GltfImage,
+    number: usize,
+    input: &Path,
+    output: &Path,
+    workspace: &Path,
+) -> Res<Plan> {
+    let label = |e: &dyn std::fmt::Display| format!("Texture {}: {e}", image.path.display());
+    let mut header = [0; 64];
+    let mut file = File::open(image.path).map_err(|e| label(&e))?;
+    let mut read = 0;
+    while read < header.len() {
+        match file.read(&mut header[read..]).map_err(|e| label(&e))? {
+            0 => break,
+            n => read += n,
+        }
+    }
+    let kind = Kind::of(&header[..read]);
+    let valid = match kind {
+        Kind::Jpeg | Kind::Png => true,
+        Kind::Webp | Kind::Avif | Kind::Ktx2 => image.extension,
+        Kind::Other => false,
+    };
+    let convert = options.convert.unwrap_or(!valid);
+    if !valid && !convert {
+        return Err(label(
+            &"unsupported glTF image format with --convert-images=false; enable conversion",
+        )
+        .into());
+    }
+    if convert && matches!(kind, Kind::Avif | Kind::Ktx2) {
+        return Err(label(
+            &"AVIF and KTX2 images can't be converted: this build has no decoder for them",
+        )
+        .into());
+    }
+    let copy = convert
+        || image.embedded
+        || match options.mode {
+            Mode::Auto => fs::canonicalize(parent(input))? != fs::canonicalize(parent(output))?,
+            Mode::Keep | Mode::Reference => false,
+            Mode::Copy => true,
+        };
+    let extension = if convert {
+        options.format.extension()
+    } else {
+        kind.extension().unwrap_or("bin")
+    };
+    let stem = output
+        .file_stem()
+        .ok_or("Invalid output filename")?
+        .to_string_lossy();
+    let name = format!("{stem}_texture_{number}.{extension}");
+    let content = if convert {
+        let converted = workspace.join(&name);
+        convert_image(image.path, &converted, options)
+            .map_err(|e| label(&format!("converting: {e}")))?;
+        converted
+    } else {
+        image.path.to_owned()
+    };
+    let checked = if convert {
+        Kind::of(&fs::read(&content)?[..])
+    } else {
+        kind
+    };
+    check_gltf_image(&content, checked).map_err(|e| label(&e))?;
+    let uri = if copy {
+        super::gltf::uri(&name)
+    } else {
+        relative_uri(
+            &fs::canonicalize(image.path)?,
+            &fs::canonicalize(parent(output))?,
+        )?
+    };
+    Ok(Plan {
+        content,
+        publish_name: copy.then_some(name),
+        uri,
+        scan: false,
+        mime: if convert { None } else { kind.mime() },
+    })
+}
+/// The header checks of `check_image`, by content, and for the formats extensions add.
+fn check_gltf_image(path: &Path, kind: Kind) -> Res<()> {
+    match kind {
+        Kind::Jpeg => Ok(()),
+        Kind::Png => {
+            png::Decoder::new(BufReader::new(File::open(path)?)).read_info()?;
+            Ok(())
+        }
+        Kind::Webp => {
+            image::ImageReader::open(path)?
+                .with_guessed_format()?
+                .into_dimensions()?;
+            Ok(())
+        }
+        Kind::Avif | Kind::Ktx2 => {
+            crate::shared::gltf::container_size(BufReader::new(File::open(path)?))
+                .map(|_| ())
+                .ok_or_else(|| "Invalid image header".into())
+        }
+        Kind::Other => Err("Unrecognized image format".into()),
+    }
+}
 pub struct Plan {
     pub content: PathBuf,
     pub publish_name: Option<String>,
     pub uri: String,
+    /// A glTF image's real type when it is kept as it is. `None` for a converted image, and for
+    /// an OBJ or VRML texture, which declares no type.
+    pub mime: Option<&'static str>,
     /// Whether the content is a published glTF image whose transparency must be scanned.
     scan: bool,
 }
@@ -126,6 +306,7 @@ pub fn prepare(
                 publish_name: None,
                 uri: relative_uri(&source, &destination)?,
                 scan: false,
+                mime: None,
             };
             plans.insert(source, plan);
             continue;
@@ -173,6 +354,7 @@ pub fn prepare(
                 publish_name: copy.then_some(name),
                 uri,
                 scan: true,
+                mime: None,
             },
         );
     }

@@ -2,8 +2,8 @@
 
 `objtools` is a Rust CLI for very large OBJ and VRML meshes, often georeferenced and larger than the machine's RAM plus swap. It has two commands:
 
-- `import` converts OBJ or VRML into glTF 2.0 JSON with an external `.bin`, and keeps, copies or converts the textures.
-- `inspect` reports vertex, face, diffuse-texel and texture-occupancy statistics. It reads glTF, and imports OBJ or VRML into a private workspace first.
+- `import` converts OBJ, VRML, glTF or GLB into glTF 2.0 JSON with an external `.bin`, and keeps, copies or converts the textures.
+- `inspect` reports vertex, face, diffuse-texel and texture-occupancy statistics. It reads glTF or GLB, and imports OBJ or VRML into a private workspace first.
 
 The README contains the command reference and inspection statistics. The GitHub wiki has two sections: Conversion (format support, georeferencing, images and material approximations) and How it works (streaming, heap/mmap/disk use and inspection algorithms). Its sources are maintained in the separate `git@github.com:sdumetz/objtools.wiki.git` repository, not in this repository. Keep both in sync with user-visible changes at the appropriate level of detail.
 
@@ -18,9 +18,9 @@ The README contains the command reference and inspection statistics. The GitHub 
 # Code layout
 
 - `src/main.rs` dispatches to the commands.
-- `src/import/` converts OBJ and VRML to glTF. `src/inspect/` measures a glTF and reports its statistics, using `import::run` for other inputs.
+- `src/import/` converts OBJ, VRML, glTF and GLB to glTF. `src/inspect/` measures a glTF and reports its statistics, using `import::run` for OBJ and VRML.
 - In each command, `cli.rs` parses arguments and prints help, and `mod.rs` holds `Options` and `run`.
-- `src/shared/` holds what more than one command uses: `Res`, workspaces and file mappings, and number formatting. Code used by one command stays in that command's directory.
+- `src/shared/` holds what more than one command uses: `Res`, workspaces and file mappings, number formatting and glTF reading. Code used by one command stays in that command's directory.
 
 # Conventions
 

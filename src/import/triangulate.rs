@@ -47,10 +47,17 @@ fn length(n: Point) -> f64 {
 
 /// Step 5. Exact: a triangle is dropped only when its corners are collinear in 3D, not merely
 /// in the projection, which a non-planar face can make look flat.
-fn has_area(points: &[Point], [a, b, c]: [usize; 3]) -> bool {
+pub fn has_area(points: &[Point], [a, b, c]: [usize; 3]) -> bool {
     cross3(points[a], points[b], points[c])
         .iter()
         .any(|n| *n != 0.)
+}
+
+/// The unit normal of a triangle with area, in winding order.
+pub fn face_normal(a: Point, b: Point, c: Point) -> Option<Point> {
+    let n = cross3(a, b, c);
+    let l = length(n);
+    (l > 0.).then(|| n.map(|x| x / l))
 }
 
 /// Step 1, earcut's `filterPoints` restricted to `equals(p, p.next)`: a corner at the same

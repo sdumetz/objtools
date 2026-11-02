@@ -187,6 +187,11 @@ impl BBox {
         ])
     }
 
+    /// Lowest and highest corner.
+    pub fn corners(&self) -> Option<([i64; 3], [i64; 3])> {
+        self.bounds
+    }
+
     /// `min → max`, for human-readable output.
     pub fn range_str(&self) -> Option<String> {
         let (min, max) = self.bounds?;

@@ -6,14 +6,14 @@ use super::{
 };
 use crate::shared::{
     format::fmt_count,
-    gltf::{element, extensions, index, Accessor, Gltf, Image},
+    gltf::{container_size, element, extensions, index, Accessor, Gltf, Image},
     Res,
 };
 use serde_json::Value;
 use std::{
     collections::{btree_map::Entry, BTreeMap, HashSet},
     fs::{self, File},
-    io::{BufRead, BufReader, Cursor, Seek},
+    io::{BufReader, Cursor},
     path::{Component, Path, PathBuf},
 };
 struct Texture {
@@ -72,13 +72,6 @@ fn relative(path: &Path, base: &Path) -> PathBuf {
     }
     let up = std::iter::repeat_n(Component::ParentDir, from.len() - common);
     up.chain(to[common..].iter().copied()).collect()
-}
-/// KTX2 and AVIF sizes, read from the container: the `image` crate can't open either format
-/// without a decoder. `None` for any other format, or for a container without a 2D size.
-fn container_size(reader: impl BufRead + Seek) -> Option<(u32, u32)> {
-    let size = imagesize::reader_size(reader).ok()?;
-    let size = (size.width.try_into().ok()?, size.height.try_into().ok()?);
-    (size.0 > 0 && size.1 > 0).then_some(size)
 }
 /// Width and height from the image header, without decoding pixels.
 fn dimensions(gltf: &Gltf, id: usize, display_base: &Path) -> Res<(String, u32, u32)> {

@@ -22,7 +22,9 @@ impl<'a> Accessor<'a> {
             Some("SCALAR") => 1,
             Some("VEC2") => 2,
             Some("VEC3") => 3,
-            Some("VEC4") => 4,
+            Some("VEC4") | Some("MAT2") => 4,
+            Some("MAT3") => 9,
+            Some("MAT4") => 16,
             _ => return Err(format!("Accessor {id}: unsupported type").into()),
         };
         let kind = a["componentType"].as_u64().unwrap_or(0);
@@ -32,7 +34,13 @@ impl<'a> Accessor<'a> {
             5125 | 5126 => 4,
             _ => return Err(format!("Accessor {id}: unsupported component type").into()),
         };
-        let size = components * width;
+        // Matrix columns start on 4-byte boundaries, which only pads narrow components.
+        let size = match (a["type"].as_str(), width) {
+            (Some("MAT2"), 1) => 8,
+            (Some("MAT3"), 1) => 12,
+            (Some("MAT3"), 2) => 24,
+            _ => components * width,
+        };
         let (data, stride) = match a.get("bufferView") {
             None => (None, size),
             Some(view) => {
@@ -71,7 +79,12 @@ impl<'a> Accessor<'a> {
             sparse,
         })
     }
-    pub fn get(&self, i: usize, c: usize) -> f64 {
+    /// Whether every element is stored at its own place in a buffer view.
+    pub fn is_dense(&self) -> bool {
+        self.data.is_some() && self.sparse.is_none()
+    }
+    /// The element's value as stored, before normalization.
+    pub fn raw(&self, i: usize, c: usize) -> f64 {
         let size = self.components * self.width;
         let replaced = self.sparse.as_ref().and_then(|sparse| {
             sparse
@@ -85,19 +98,28 @@ impl<'a> Accessor<'a> {
         };
         let o = start + c * self.width;
         let b = &data[o..o + self.width];
-        let (raw, max) = match self.kind {
-            5120 => (f64::from(b[0] as i8), 127.),
-            5121 => (f64::from(b[0]), 255.),
-            5122 => (f64::from(i16::from_le_bytes([b[0], b[1]])), 32767.),
-            5123 => (f64::from(u16::from_le_bytes([b[0], b[1]])), 65535.),
-            5125 => (f64::from(u32::from_le_bytes(b.try_into().unwrap())), 1.),
-            _ => return f64::from(f32::from_le_bytes(b.try_into().unwrap())),
-        };
-        if self.normalized {
-            (raw / max).max(-1.)
-        } else {
-            raw
+        match self.kind {
+            5120 => f64::from(b[0] as i8),
+            5121 => f64::from(b[0]),
+            5122 => f64::from(i16::from_le_bytes([b[0], b[1]])),
+            5123 => f64::from(u16::from_le_bytes([b[0], b[1]])),
+            5125 => f64::from(u32::from_le_bytes(b.try_into().unwrap())),
+            _ => f64::from(f32::from_le_bytes(b.try_into().unwrap())),
         }
+    }
+    pub fn get(&self, i: usize, c: usize) -> f64 {
+        let raw = self.raw(i, c);
+        if !self.normalized {
+            return raw;
+        }
+        let max = match self.kind {
+            5120 => 127.,
+            5121 => 255.,
+            5122 => 32767.,
+            5123 => 65535.,
+            _ => return raw,
+        };
+        (raw / max).max(-1.)
     }
 }
 /// Elements replaced over an accessor's base values. They are looked up in the mapped index list

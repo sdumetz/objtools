@@ -2,7 +2,7 @@
 name = "objtools"
 version = "0.1.0"
 edition = "2021"
-description = "Disk-backed OBJ and VRML importer for georeferenced glTF assets"
+description = "Disk-backed OBJ, VRML and glTF importer for georeferenced glTF assets"
 readme = "README.md"
 
 [dependencies]

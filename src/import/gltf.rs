@@ -15,8 +15,9 @@ use std::{
 };
 /// glTF reserves each index type's maximum value for primitive restart: a primitive with
 /// `UNSIGNED_SHORT` indices holds at most 65,535 vertices, one with `UNSIGNED_INT` 2^32 - 1.
-const SHORT_VERTICES: u64 = u16::MAX as u64;
-const MAX_VERTICES: u64 = u32::MAX as u64;
+pub const SHORT_VERTICES: u64 = u16::MAX as u64;
+pub const MAX_VERTICES: u64 = u32::MAX as u64;
+pub const COORDINATE_CONVENTION: &str = "Source units preserved (assumed metres); no CRS inferred";
 /// Floats per vertex up to the end of the UV, and where the colour starts (11 when absent).
 fn layout(uv: bool, color: bool) -> (usize, usize, u64) {
     let uv_end = if uv { 8 } else { 6 };
@@ -166,9 +167,17 @@ pub fn uri(name: &str) -> String {
     out
 }
 // Track published paths so an error removes incomplete output, without touching existing files.
-struct Outputs {
+pub struct Outputs {
     paths: Vec<PathBuf>,
-    committed: bool,
+    pub committed: bool,
+}
+impl Outputs {
+    pub fn new() -> Self {
+        Self {
+            paths: Vec::new(),
+            committed: false,
+        }
+    }
 }
 impl Drop for Outputs {
     fn drop(&mut self) {
@@ -179,7 +188,7 @@ impl Drop for Outputs {
         }
     }
 }
-fn create(path: &Path, outputs: &mut Outputs) -> Res<File> {
+pub fn create(path: &Path, outputs: &mut Outputs) -> Res<File> {
     let f = OpenOptions::new().write(true).create_new(true).open(path)?;
     outputs.paths.push(path.to_owned());
     Ok(f)
@@ -435,10 +444,7 @@ fn write_with_limit(
     if !center && !quiet {
         eprintln!("Note: coordinates were encoded as float32 without recentering; use --center for georeferenced assets");
     }
-    let mut outputs = Outputs {
-        paths: Vec::new(),
-        committed: false,
-    };
+    let mut outputs = Outputs::new();
     let parent = output
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -552,7 +558,7 @@ fn write_with_limit(
         "scene":0,"scenes":[{"nodes":(0..nodes.len()).collect::<Vec<_>>()}],"nodes":nodes,"meshes":meshes,
         "buffers":[{"uri":uri(&bin_path.file_name().unwrap().to_string_lossy()),"byteLength":document.offset}],
         "bufferViews":document.views,"accessors":document.accessors,"materials":materials,
-        "extensionsUsed":extensions,"extras":{"objtools":{"origin":origin_strings,"sourceBounds":scene.bbox.to_record(),"centered":center,"sourceUpAxis":if z_up {"z"} else {"y"},"coordinateConvention":"Source units preserved (assumed metres); no CRS inferred"}}});
+        "extensionsUsed":extensions,"extras":{"objtools":{"origin":origin_strings,"sourceBounds":scene.bbox.to_record(),"centered":center,"sourceUpAxis":if z_up {"z"} else {"y"},"coordinateConvention":COORDINATE_CONVENTION}}});
     // Without the transform a texture lands in the wrong place, so a viewer that cannot apply
     // it must refuse the model rather than show it wrong. Other extensions degrade gracefully.
     if extensions.contains("KHR_texture_transform") {
