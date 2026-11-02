@@ -52,17 +52,17 @@ pub fn run(opts: Options) -> Res<()> {
             input: opts.input.clone(),
             output: output.clone(),
             tmp_dir: workspace.path.clone(),
-            center: false,
-            z_up: false,
             progress: opts.progress,
             keep_tmp: opts.keep_tmp,
+            quiet: true,
+            // Images only need to be where the report can name them: this glTF is never
+            // published, and image placement changes none of the figures.
             images: import::images::Options {
                 mode: import::images::Mode::Reference,
                 ..Default::default()
             },
-            quiet: true,
-            // Colours change neither the vertices nor the texels counted.
-            no_color: true,
+            // Everything else follows import's defaults, so the figures are those of its output.
+            ..Default::default()
         })?;
         output
     };

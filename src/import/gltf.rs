@@ -601,13 +601,8 @@ mod tests {
             input: input.clone(),
             output: output.clone(),
             tmp_dir: dir.clone(),
-            center: false,
-            z_up: false,
-            progress: false,
-            keep_tmp: false,
-            images: Default::default(),
             quiet: true,
-            no_color: false,
+            ..Default::default()
         };
         let scene = obj::spool(&input, &dir, false, None, true).unwrap();
         write_with_limit(scene, &dir, &options, limit).unwrap();

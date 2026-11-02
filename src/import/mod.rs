@@ -13,6 +13,7 @@ mod vrml;
 
 use crate::shared::{disk::Workspace, Res};
 use std::path::PathBuf;
+#[derive(Default)]
 pub struct Options {
     pub input: PathBuf,
     pub output: PathBuf,

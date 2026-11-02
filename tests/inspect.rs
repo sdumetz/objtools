@@ -138,6 +138,23 @@ fn obj_report_matches_report_of_imported_gltf() {
     assert_eq!(f.inspect_json("in.obj"), f.inspect_json("in.gltf"));
 }
 #[test]
+fn vertex_colors_are_imported_as_by_default() {
+    let f = Fixture::new();
+    f.file(
+        "in.obj",
+        "v 0 0 0 2 0 0\nv 1 0 0 0 1 0\nv 1 1 0 0 0 1\nf 1 2 3\n",
+    );
+    let out = f.run(&["inspect"], "in.obj");
+    assert!(out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("vertex colors outside [0,1] are clamped"),
+        "{stderr}"
+    );
+    assert!(f.run(&["import"], "in.obj").status.success());
+    assert_eq!(f.inspect("in.obj"), f.inspect("in.gltf"));
+}
+#[test]
 fn textures_gltf_cannot_carry_are_measured_without_conversion() {
     let f = half_textured("source.bmp");
     assert!(f
