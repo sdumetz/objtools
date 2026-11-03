@@ -481,7 +481,7 @@ fn write_with_limit(
         // writing `Tr` as opacity, and silently invisible objects would leave no clue why.
         // Glass (`illum 4`/`9`) keeps alpha 1, so `d 0` there, clear glass, is not flagged.
         if value["pbrMetallicRoughness"]["baseColorFactor"][3] == 0. && invisible.insert(old_id) {
-            crate::say!("Warning: material {} is fully transparent (d 0 or Tr 1) and will be invisible; check whether its exporter writes Tr as opacity", m.name);
+            crate::say!("Warning: material {} is fully transparent (d 0 or Tr 1) and will be invisible; check whether its exporter writes Tr as opacity", crate::shared::diagnostics::safe(&m.name));
         }
         if m.texture.is_some() && !textured {
             value["name"] = json!(format!("{}-untextured", m.name));

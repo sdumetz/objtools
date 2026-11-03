@@ -1,6 +1,6 @@
 //! The statistics report: one structure, serialized for `--json` and pretty-printed otherwise, so
 //! that both outputs carry the same data.
-use crate::shared::format::fmt_count;
+use crate::shared::{diagnostics::safe, format::fmt_count};
 use serde::Serialize;
 use std::fmt;
 
@@ -75,7 +75,7 @@ impl fmt::Display for Report {
             "Texture occupancy:  {}",
             fmt_occupancy(self.texture_occupancy)
         )?;
-        let names = self.textures.iter().map(|t| t.name.chars().count());
+        let names = self.textures.iter().map(|t| safe(&t.name).chars().count());
         let Some(width) = names.max().map(|n| n.max(7)) else {
             return Ok(());
         };
@@ -85,7 +85,7 @@ impl fmt::Display for Report {
             writeln!(
                 f,
                 "{:width$}  {size:>11}  {}",
-                t.name,
+                safe(&t.name),
                 fmt_occupancy(t.occupancy)
             )?;
         }

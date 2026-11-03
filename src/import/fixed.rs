@@ -16,7 +16,12 @@ pub const SCALE: i128 = 10_000_000_000;
 /// Subtraction stays in integers until local coordinates are encoded as float32.
 pub fn parse_decimal_fixed(s: &str) -> Result<i64, Box<dyn std::error::Error>> {
     let s = s.trim();
-    let invalid = || format!("Invalid or out-of-range coordinate: {s}");
+    let invalid = || {
+        format!(
+            "Invalid or out-of-range coordinate: {}",
+            crate::shared::diagnostics::safe(s)
+        )
+    };
     let (negative, body) = if let Some(b) = s.strip_prefix('-') {
         (true, b)
     } else {

@@ -1,5 +1,5 @@
 //! Conservative Phong -> PBR policy: no inferred metals, explicit specular extension.
-use crate::shared::{failure::Context, references::References, Res};
+use crate::shared::{diagnostics::safe, failure::Context, references::References, Res};
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
@@ -138,7 +138,7 @@ fn take_numbers(rest: &mut &str, option: &str, min: usize, max: usize) -> Res<Ve
         }
     }
     if values.len() < min {
-        return Err(format!("map_Kd {option} expects {min} number(s)").into());
+        return Err(format!("map_Kd {} expects {min} number(s)", safe(option)).into());
     }
     Ok(values)
 }
@@ -146,7 +146,12 @@ fn take_switch(rest: &mut &str, option: &str) -> Res<bool> {
     match take_token(rest) {
         "on" => Ok(true),
         "off" => Ok(false),
-        other => Err(format!("map_Kd {option} expects on or off, not {other:?}").into()),
+        other => Err(format!(
+            "map_Kd {} expects on or off, not {}",
+            safe(option),
+            safe(other)
+        )
+        .into()),
     }
 }
 /// Apply the options leading a `map_Kd` statement, the MTL spec's list for it plus a few that
@@ -206,7 +211,7 @@ fn texture_options<'a>(mut rest: &'a str, m: &mut Material) -> Res<(&'a str, Vec
             "-imfchan" => {
                 take_token(&mut rest);
             }
-            _ => return Err(format!("Unsupported map_Kd option {option}").into()),
+            _ => return Err(format!("Unsupported map_Kd option {}", safe(option)).into()),
         }
     }
 }
@@ -293,7 +298,8 @@ pub fn load(
                     for option in ignored {
                         if unsupported.insert(format!("map_Kd {option}")) {
                             crate::say!(
-                                "Warning: map_Kd {option} is ignored in {}",
+                                "Warning: map_Kd {} is ignored in {}",
+                                safe(option),
                                 path.display()
                             );
                         }
@@ -302,13 +308,14 @@ pub fn load(
                     let base =
                         texture_base.unwrap_or_else(|| path.parent().unwrap_or(Path::new(".")));
                     let file = references.resolve(base, name);
-                    m.texture = Some(file.with_context(|| format!("Texture {name}"))?);
+                    m.texture = Some(file.with_context(|| format!("Texture {}", safe(name)))?);
                 }
                 "" | "ka" => {}
                 _ => {
                     if unsupported.insert(key.to_owned()) {
                         crate::say!(
-                            "Warning: unsupported MTL property {written} in {}",
+                            "Warning: unsupported MTL property {} in {}",
+                            safe(written),
                             path.display()
                         );
                     }

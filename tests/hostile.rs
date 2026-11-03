@@ -649,3 +649,36 @@ fn a_rejected_file_cannot_drive_a_terminal_through_its_error() {
     u.write("m.obj", &format!("v 1{HOSTILE} 0 0\n"));
     assert_harmless(&u.stderr_of(&["import", "m.obj", "-o", "out.gltf"]));
 }
+#[test]
+fn a_name_from_the_file_is_cleaned_and_cut() {
+    let u = Upload::new();
+    let long = "x".repeat(200);
+    u.write(
+        "m.obj",
+        &format!("usemtl <{long}\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n"),
+    );
+    let out = u.run(&["import", "m.obj", "-o", "out.gltf"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("material ?xxx"), "{stderr}");
+    assert!(!stderr.contains(&"x".repeat(64)), "{stderr}");
+}
+#[cfg(unix)]
+#[test]
+fn the_report_of_inspect_cleans_texture_names_but_its_json_keeps_them() {
+    let u = Upload::new();
+    let name = "e\x1b[31m.png";
+    uv_buffer(&u);
+    image::RgbImage::new(4, 4)
+        .save_with_format(u.job().join(name), image::ImageFormat::Png)
+        .unwrap();
+    u.write("m.gltf", &gltf_with_image("e%1B%5B31m.png"));
+    let text = u.run(&["inspect", "m.gltf"]);
+    let stderr = String::from_utf8_lossy(&text.stderr);
+    assert_eq!(text.status.code(), Some(0), "{stderr}");
+    let text = String::from_utf8_lossy(&text.stdout);
+    assert!(text.contains("e?[31m.png"), "{text}");
+    assert_harmless(&text);
+    let json = u.run(&["inspect", "m.gltf", "--json"]);
+    let json: Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(json["textures"][0]["name"], name);
+}

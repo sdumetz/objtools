@@ -32,7 +32,11 @@ pub fn run(opts: Options) -> Res<()> {
         .unwrap_or("")
         .to_ascii_lowercase();
     if !matches!(ext.as_str(), "gltf" | "glb" | "obj" | "wrl" | "vrml") {
-        return Err(format!("Unsupported input format: .{ext}").into());
+        return Err(format!(
+            "Unsupported input format: .{}",
+            crate::shared::diagnostics::safe(&ext)
+        )
+        .into());
     }
     if !opts.input.is_file() {
         return Err(format!("{}: no such file", opts.input.display()).into());

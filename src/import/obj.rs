@@ -5,7 +5,7 @@ use super::{
     fixed::{parse_three_fixed, BBox},
     material::{self, Material},
 };
-use crate::shared::{failure::Context, references::References, Res};
+use crate::shared::{diagnostics::safe, failure::Context, references::References, Res};
 use std::{
     collections::{HashMap, HashSet},
     fs::File,
@@ -319,7 +319,7 @@ pub fn spool(
                     } else {
                         for name in rest.split_whitespace() {
                             let file = libraries.resolve(parent, name);
-                            load(&file.with_context(|| format!("mtllib {name}"))?)?;
+                            load(&file.with_context(|| format!("mtllib {}", safe(name)))?)?;
                         }
                     }
                 }
@@ -367,7 +367,10 @@ pub fn spool(
                 "" | "g" => {}
                 _ => {
                     if warned.insert(key.to_owned()) {
-                        crate::say!("Warning: unsupported OBJ record {written} is omitted");
+                        crate::say!(
+                            "Warning: unsupported OBJ record {} is omitted",
+                            safe(written)
+                        );
                     }
                 }
             }
@@ -394,7 +397,10 @@ pub fn spool(
         if let Some(def) = definitions.remove(&m.name) {
             *m = def;
         } else if m.name != "default" {
-            crate::say!("Warning: undefined material {}; using default", m.name);
+            crate::say!(
+                "Warning: undefined material {}; using default",
+                safe(&m.name)
+            );
         }
     }
     Ok(scene)

@@ -334,7 +334,7 @@ pub fn prepare(
         let supported = matches!(ext.as_str(), "jpg" | "jpeg" | "png");
         let convert = options.convert.unwrap_or(!supported);
         if !supported && !convert {
-            return Err(format!("Texture {} has unsupported glTF image format .{ext} with --convert-images=false; enable conversion", source.display()).into());
+            return Err(format!("Texture {} has unsupported glTF image format .{} with --convert-images=false; enable conversion", source.display(), crate::shared::diagnostics::safe(&ext)).into());
         }
         let copy = convert
             || match options.mode {

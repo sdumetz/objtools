@@ -45,7 +45,11 @@ pub fn unsupported_extensions(root: &mut Value, declared: &BTreeSet<String>) {
     strip_extensions(root, &mut dropped);
     dropped.retain(|name| !declared.contains(name) || extensions::is_compression(name));
     if !dropped.is_empty() {
-        let list = dropped.iter().cloned().collect::<Vec<_>>().join(", ");
+        let list = dropped
+            .iter()
+            .map(|name| crate::shared::diagnostics::safe(name))
+            .collect::<Vec<_>>()
+            .join(", ");
         crate::say!(
             "Warning: dropped {} extensions from the output: {list}",
             dropped.len()

@@ -271,7 +271,7 @@ fn read_face(r: &mut impl Read, out: &mut Vec<i32>) -> std::io::Result<bool> {
                 if i < 0 {
                     return Err(std::io::Error::new(
                         ErrorKind::InvalidData,
-                        "VRML index must be >= 0 or -1",
+                        "VRML index must be 0 or more, or -1",
                     ));
                 }
                 if out.len() >= super::obj::MAX_FACE {

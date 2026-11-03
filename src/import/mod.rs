@@ -45,7 +45,11 @@ pub fn run(mut opts: Options) -> Res<()> {
         .unwrap_or("")
         .to_ascii_lowercase();
     if !matches!(ext.as_str(), "obj" | "wrl" | "vrml" | "gltf" | "glb") {
-        return Err(format!("Unsupported input format: .{ext}").into());
+        return Err(format!(
+            "Unsupported input format: .{}",
+            crate::shared::diagnostics::safe(&ext)
+        )
+        .into());
     }
     if opts.output.extension().and_then(|s| s.to_str()) != Some("gltf") {
         return Err("Output must have a .gltf extension".into());
