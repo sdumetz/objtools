@@ -570,3 +570,55 @@ fn a_library_named_by_an_absolute_path_with_spaces_is_found() {
     let root: Value = serde_json::from_slice(&fs::read(u.job().join("out.gltf")).unwrap()).unwrap();
     assert!(root["materials"][0]["pbrMetallicRoughness"]["baseColorFactor"].is_array());
 }
+#[test]
+fn keeping_images_never_writes_a_reference_outside_the_output_folder() {
+    for input in ["in.obj", "in.gltf"] {
+        let u = Upload::new();
+        fs::create_dir(u.job().join("elsewhere")).unwrap();
+        image::RgbImage::new(4, 4)
+            .save(u.job().join("t.png"))
+            .unwrap();
+        u.write("in.mtl", "newmtl m\nmap_Kd t.png\n");
+        u.write("in.obj", TEXTURED_OBJ);
+        uv_buffer(&u);
+        u.write("in.gltf", &gltf_with_image("t.png"));
+        let target = "elsewhere/out.gltf";
+        let keep = ["import", input, "-o", target, "--images", "keep"];
+        let stderr = u.stderr_of(&keep);
+        assert!(stderr.contains("--images keep"), "{stderr}");
+        assert!(!u.job().join(target).exists());
+        // Copied by default, so what's published stands alone.
+        let out = u.run(&["import", input, "-o", target]);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let root: Value = serde_json::from_slice(&fs::read(u.job().join(target)).unwrap()).unwrap();
+        assert_eq!(root["images"][0]["uri"], "out_texture_0.png");
+        // The same folder keeps working, and `--trusted` allows the rest.
+        let out = u.run(&["import", input, "-o", "same.gltf", "--images", "keep"]);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let target = "elsewhere/trusted.gltf";
+        let out = u.run(&[
+            "import",
+            input,
+            "-o",
+            target,
+            "--images",
+            "keep",
+            "--trusted",
+        ]);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let root: Value = serde_json::from_slice(&fs::read(u.job().join(target)).unwrap()).unwrap();
+        assert_eq!(root["images"][0]["uri"], "../t.png");
+    }
+}

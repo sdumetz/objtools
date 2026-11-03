@@ -616,7 +616,11 @@ fn image_defaults_keep_in_same_folder_and_copy_in_different_folder() {
         fs::read(f.0.join("source.png")).unwrap(),
         fs::read(f.0.join("destination/out_texture_0.png")).unwrap()
     );
-    let result = import_images(&f, "destination/keep.gltf", &["--images", "keep"]);
+    let result = import_images(
+        &f,
+        "destination/keep.gltf",
+        &["--images", "keep", "--trusted"],
+    );
     assert!(
         result.status.success(),
         "{}",

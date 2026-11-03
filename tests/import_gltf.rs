@@ -1742,7 +1742,13 @@ fn image_policies_follow_the_options() {
     let root: Value = serde_json::from_slice(&fs::read(&target).unwrap()).unwrap();
     assert_eq!(root["images"][0]["uri"], "a_texture_0.png");
     let target = f.0.join("elsewhere/b.gltf");
-    run(&["-o", target.to_str().unwrap(), "--images", "keep"]);
+    run(&[
+        "-o",
+        target.to_str().unwrap(),
+        "--images",
+        "keep",
+        "--trusted",
+    ]);
     let root: Value = serde_json::from_slice(&fs::read(&target).unwrap()).unwrap();
     assert_eq!(root["images"][0]["uri"], "../tex.png");
 }

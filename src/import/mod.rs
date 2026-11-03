@@ -36,7 +36,8 @@ pub struct Options {
     /// Follow file references anywhere, rather than only inside the input's directory.
     pub trusted: bool,
 }
-pub fn run(opts: Options) -> Res<()> {
+pub fn run(mut opts: Options) -> Res<()> {
+    opts.images.outside_references = opts.trusted;
     let ext = opts
         .input
         .extension()

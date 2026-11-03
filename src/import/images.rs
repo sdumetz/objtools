@@ -54,6 +54,9 @@ pub struct Options {
     pub convert: Option<bool>,
     pub format: Format,
     pub quality: u8,
+    /// Let the output refer to images outside its own folder: `import::run` sets this from
+    /// `--trusted`. `Mode::Reference` never gets as far as asking.
+    pub outside_references: bool,
 }
 impl Default for Options {
     fn default() -> Self {
@@ -62,6 +65,7 @@ impl Default for Options {
             convert: None,
             format: Format::Jpg,
             quality: 95,
+            outside_references: false,
         }
     }
 }
@@ -217,9 +221,10 @@ pub fn prepare_gltf_image(
     let uri = if copy {
         uri(&name)
     } else {
-        relative_uri(
+        kept_uri(
             &fs::canonicalize(image.path)?,
             &fs::canonicalize(parent(output))?,
+            options,
         )?
     };
     Ok(Plan {
@@ -278,6 +283,14 @@ fn relative_uri(source: &Path, destination: &Path) -> Res<String> {
         }
     }
     Ok(parts.join("/"))
+}
+/// The URI of an image left where it is. A published model doesn't refer outside its own folder
+/// unless the user vouches for it, and `--images auto` copies rather than getting here.
+fn kept_uri(source: &Path, destination: &Path, options: &Options) -> Res<String> {
+    if !options.outside_references && !source.starts_with(destination) {
+        return Err("--images keep would refer outside the output's folder; use --images copy, or --trusted to allow it".into());
+    }
+    relative_uri(source, destination)
 }
 pub fn prepare(
     options: &Options,
@@ -347,7 +360,7 @@ pub fn prepare(
         let uri = if copy {
             uri(&name)
         } else {
-            relative_uri(&source, &destination)?
+            kept_uri(&source, &destination, options)?
         };
         plans.insert(
             source,
