@@ -629,7 +629,7 @@ fn text_from_the_file_cannot_drive_a_terminal() {
     let out = u.run(&["import", "m.obj", "-o", "out.gltf"]);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(0), "{stderr}");
-    assert!(stderr.contains("undefined material"), "{stderr}");
+    assert!(stderr.contains("undefined materials"), "{stderr}");
     assert_harmless(&stderr);
 }
 #[test]
@@ -648,7 +648,7 @@ fn a_name_from_the_file_is_cleaned_and_cut() {
     );
     let out = u.run(&["import", "m.obj", "-o", "out.gltf"]);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("material ?xxx"), "{stderr}");
+    assert!(stderr.contains("for example ?xxx"), "{stderr}");
     assert!(!stderr.contains(&"x".repeat(64)), "{stderr}");
 }
 #[cfg(unix)]
@@ -733,4 +733,71 @@ fn an_error_in_a_generated_file_names_the_vrml_it_came_from() {
         stderr.contains("Error: m.wrl: Texture missing.png: "),
         "{stderr}"
     );
+}
+#[track_caller]
+fn assert_few_lines(stderr: &str) {
+    assert!(stderr.lines().count() <= 5, "{stderr}");
+    assert!(stderr.len() < 2_000, "{} bytes", stderr.len());
+}
+#[test]
+fn thousands_of_undefined_materials_are_one_warning() {
+    let u = Upload::new();
+    let mut obj = String::from("v 0 0 0\nv 1 0 0\nv 0 1 0\n");
+    for i in 0..20_000 {
+        obj.push_str(&format!("usemtl \x1b[31m{i}\nf 1 2 3\n"));
+    }
+    u.write("m.obj", &obj);
+    let out = u.run(&["import", "m.obj", "-o", "out.gltf"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    assert!(
+        stderr.contains("undefined materials, using the default: 20000"),
+        "{stderr}"
+    );
+    assert_few_lines(&stderr);
+}
+#[test]
+fn thousands_of_unsupported_keywords_are_one_warning() {
+    let u = Upload::new();
+    let mut obj = String::from("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n");
+    for i in 0..20_000 {
+        obj.push_str(&format!("keyword{i}\n"));
+    }
+    u.write("m.obj", &obj);
+    let out = u.run(&["import", "m.obj", "-o", "out.gltf"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    assert!(
+        stderr.contains("unsupported OBJ records omitted: 20000"),
+        "{stderr}"
+    );
+    assert_few_lines(&stderr);
+}
+#[test]
+fn repeating_a_library_does_not_repeat_its_warning() {
+    let u = Upload::new();
+    u.write("m.mtl", "newmtl m\nodd 1\n");
+    let libraries = "mtllib m.mtl\n".repeat(2_000);
+    u.write(
+        "m.obj",
+        &format!("{libraries}v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n"),
+    );
+    let out = u.run(&["import", "m.obj", "-o", "out.gltf"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    assert!(
+        stderr.contains("unsupported MTL properties ignored: 2000"),
+        "{stderr}"
+    );
+    assert_few_lines(&stderr);
+}
+#[test]
+fn warnings_found_before_a_failure_still_show() {
+    let u = Upload::new();
+    u.write("m.obj", "odd 1\nv 0 0 oops\n");
+    let stderr = u.stderr_of(&["import", "m.obj", "-o", "out.gltf"]);
+    let warning = stderr
+        .find("unsupported OBJ records omitted: 1")
+        .expect(&stderr);
+    assert!(warning < stderr.find("Error: ").expect(&stderr), "{stderr}");
 }

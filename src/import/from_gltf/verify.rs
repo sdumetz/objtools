@@ -4,7 +4,7 @@ use super::{fix::Materials, place::Previous, Model};
 use crate::{
     import::gltf::MAX_VERTICES,
     shared::{
-        diagnostics::safe,
+        diagnostics::{safe, Tally},
         gltf::{element, extensions, index, matrix::instancing, Accessor, Gltf},
         Res,
     },
@@ -228,15 +228,13 @@ pub fn accessors_are_finite(gltf: &Gltf, model: &Model) -> Res<()> {
 /// Only warns: a blended material with no opacity is valid, but rarely what anyone meant.
 pub fn warn_fully_transparent_materials(materials: &Materials) {
     let sources: BTreeSet<usize> = materials.ids.keys().map(|(source, _)| *source).collect();
+    let mut invisible = Tally::new("fully transparent materials, which will be invisible");
     for source in sources {
         let material = &materials.source[source];
         let alpha = &material["pbrMetallicRoughness"]["baseColorFactor"][3];
         if material["alphaMode"] == "BLEND" && alpha == 0. {
             let name = material["name"].as_str().unwrap_or("material");
-            crate::say!(
-                "Warning: material {} is fully transparent and will be invisible",
-                safe(name)
-            );
+            invisible.add(name);
         }
     }
 }

@@ -1,6 +1,12 @@
 //! Source image policy and optional decoding/encoding, one image at a time.
 use super::material::Material;
-use crate::shared::{disk::parent, failure::Context, gltf::uri, Res};
+use crate::shared::{
+    diagnostics::{shown, Tally},
+    disk::parent,
+    failure::Context,
+    gltf::uri,
+    Res,
+};
 use std::{
     collections::{HashMap, HashSet},
     fs::{self, File},
@@ -155,8 +161,9 @@ pub fn prepare_gltf_image(
     input: &Path,
     output: &Path,
     workspace: &Path,
+    composited: &mut Tally,
 ) -> Res<Plan> {
-    let label = || format!("Texture {}", crate::shared::diagnostics::shown(image.path));
+    let label = || format!("Texture {}", shown(image.path));
     let mut header = [0; 64];
     let mut file = File::open(image.path).with_context(label)?;
     let mut read = 0;
@@ -206,7 +213,7 @@ pub fn prepare_gltf_image(
     let name = format!("{stem}_texture_{number}.{extension}");
     let content = if convert {
         let converted = workspace.join(&name);
-        convert_image(image.path, &converted, options)
+        convert_image(image.path, &converted, options, composited)
             .with_context(|| format!("{}: converting", label()))?;
         converted
     } else {
@@ -306,12 +313,12 @@ pub fn prepare(
         .ok_or("Invalid output filename")?
         .to_string_lossy();
     let mut plans = HashMap::new();
+    let mut composited = composited_tally();
     for material in materials {
         let Some(path) = &material.texture else {
             continue;
         };
-        let source = fs::canonicalize(path)
-            .with_context(|| format!("Texture {}", crate::shared::diagnostics::shown(path)))?;
+        let source = fs::canonicalize(path).with_context(|| format!("Texture {}", shown(path)))?;
         if plans.contains_key(&source) {
             continue;
         }
@@ -334,7 +341,7 @@ pub fn prepare(
         let supported = matches!(ext.as_str(), "jpg" | "jpeg" | "png");
         let convert = options.convert.unwrap_or(!supported);
         if !supported && !convert {
-            return Err(format!("Texture {} has unsupported glTF image format .{} with --convert-images=false; enable conversion", crate::shared::diagnostics::shown(&source), crate::shared::diagnostics::safe(&ext)).into());
+            return Err(format!("Texture {} has unsupported glTF image format .{} with --convert-images=false; enable conversion", shown(&source), crate::shared::diagnostics::safe(&ext)).into());
         }
         let copy = convert
             || match options.mode {
@@ -350,18 +357,13 @@ pub fn prepare(
         let name = format!("{stem}_texture_{}.{output_ext}", plans.len());
         let content = if convert {
             let converted = workspace.join(&name);
-            convert_image(&source, &converted, options).with_context(|| {
-                format!(
-                    "Converting texture {}",
-                    crate::shared::diagnostics::shown(&source)
-                )
-            })?;
+            convert_image(&source, &converted, options, &mut composited)
+                .with_context(|| format!("Converting texture {}", shown(&source)))?;
             converted
         } else {
             source.clone()
         };
-        check_image(&content)
-            .with_context(|| format!("Texture {}", crate::shared::diagnostics::shown(&source)))?;
+        check_image(&content).with_context(|| format!("Texture {}", shown(&source)))?;
         let uri = if copy {
             uri(&name)
         } else {
@@ -380,7 +382,16 @@ pub fn prepare(
     }
     Ok(plans)
 }
-fn convert_image(source: &Path, destination: &Path, options: &Options) -> Res<()> {
+/// One warning for all the textures of a model, however many it has.
+pub fn composited_tally() -> Tally {
+    Tally::new("textures converted to JPG with transparency composited onto white (--image-format png preserves alpha)")
+}
+fn convert_image(
+    source: &Path,
+    destination: &Path,
+    options: &Options,
+    composited: &mut Tally,
+) -> Res<()> {
     let decoded = image::ImageReader::open(source)?
         .with_guessed_format()?
         .decode()?;
@@ -391,7 +402,7 @@ fn convert_image(source: &Path, destination: &Path, options: &Options) -> Res<()
             let rgb = if decoded.has_alpha() {
                 let mut rgba = decoded.to_rgba8();
                 if rgba.pixels().any(|p| p[3] != 255) {
-                    crate::say!("Warning: converting {} to JPG composites transparency onto white; use --image-format png to preserve alpha", crate::shared::diagnostics::shown(source));
+                    composited.add(&shown(source));
                 }
                 for p in rgba.pixels_mut() {
                     for i in 0..3 {

@@ -1173,7 +1173,8 @@ fn fully_transparent_materials_warn_only_when_blended() {
         model.root["meshes"][0]["primitives"][0]["material"] = json!(0);
         model.root["materials"] = json!([{"name": "ghost", "alphaMode": mode, "pbrMetallicRoughness": {"baseColorFactor": [1, 1, 1, 0]}}]);
         let (_, _, stderr) = model.write().import(&[]);
-        stderr.contains("ghost is fully transparent")
+        stderr
+            .contains("fully transparent materials, which will be invisible: 1, for example ghost")
     };
     assert!(warns("BLEND"));
     assert!(!warns("OPAQUE"));
@@ -1522,7 +1523,7 @@ fn unknown_extensions_are_dropped_or_refused() {
     let (root, _, stderr) = model.write().import(&[]);
     assert!(root["nodes"][0].get("extensions").is_none());
     assert!(
-        stderr.contains("dropped 1 extensions from the output: VENDOR_undeclared"),
+        stderr.contains("extensions dropped from the output: 1, for example VENDOR_undeclared"),
         "{stderr}"
     );
 
@@ -1552,7 +1553,9 @@ fn compression_is_refused_unless_uncompressed_data_is_there() {
     assert!(primitive(&root).get("extensions").is_none());
     assert!(root.get("extensionsUsed").is_none());
     assert!(
-        stderr.contains("dropped 1 extensions from the output: KHR_draco_mesh_compression"),
+        stderr.contains(
+            "extensions dropped from the output: 1, for example KHR_draco_mesh_compression"
+        ),
         "{stderr}"
     );
     assert_eq!(indices_of(&root, &bin, primitive(&root)), [0, 1, 2]);

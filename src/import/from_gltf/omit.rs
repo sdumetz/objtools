@@ -2,6 +2,7 @@
 //! obvious from the input, and leaves no reference to it behind.
 use super::fix::texture_slots;
 use crate::shared::{
+    diagnostics::Tally,
     gltf::{extensions, index},
     Res,
 };
@@ -44,16 +45,9 @@ pub fn unsupported_extensions(root: &mut Value, declared: &BTreeSet<String>) {
     let mut dropped = BTreeSet::new();
     strip_extensions(root, &mut dropped);
     dropped.retain(|name| !declared.contains(name) || extensions::is_compression(name));
-    if !dropped.is_empty() {
-        let list = dropped
-            .iter()
-            .map(|name| crate::shared::diagnostics::safe(name))
-            .collect::<Vec<_>>()
-            .join(", ");
-        crate::say!(
-            "Warning: dropped {} extensions from the output: {list}",
-            dropped.len()
-        );
+    let mut tally = Tally::new("extensions dropped from the output");
+    for name in &dropped {
+        tally.add(name);
     }
 }
 /// Points, lines and primitives without `POSITION`, as OBJ's unsupported records are.

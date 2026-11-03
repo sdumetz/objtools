@@ -714,7 +714,7 @@ fn png_conversion_preserves_alpha_and_jpg_composites_white() {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    assert!(String::from_utf8_lossy(&result.stderr).contains("composites transparency onto white"));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("transparency composited onto white"));
     assert!(image::open(f.0.join("jpg_texture_0.jpg"))
         .unwrap()
         .to_rgb8()
@@ -898,8 +898,10 @@ fn map_kd_options_become_texture_transform_and_clamp() {
     let result = f.import("in.obj", false);
     let stderr = String::from_utf8_lossy(&result.stderr);
     assert!(result.status.success(), "{stderr}");
-    assert!(stderr.contains("map_Kd -mm is ignored"), "{stderr}");
-    assert!(stderr.contains("map_Kd -t is ignored"), "{stderr}");
+    assert!(
+        stderr.contains("unsupported map_Kd options ignored: 2, for example -mm, -t"),
+        "{stderr}"
+    );
     let (root, _) = f.result();
     // One image, sampled by two textures: repeat for `plain`, clamp for `tiled`.
     assert_eq!(root["images"].as_array().unwrap().len(), 1);
@@ -958,12 +960,12 @@ fn fully_transparent_materials_warn_once_unless_glass() {
     let stderr = String::from_utf8_lossy(&result.stderr);
     assert!(result.status.success(), "{stderr}");
     assert_eq!(
-        stderr.matches("is fully transparent").count(),
+        stderr.matches("fully transparent materials").count(),
         1,
         "{stderr}"
     );
     assert!(
-        stderr.contains("material ghost is fully transparent"),
+        stderr.contains("fully transparent materials") && stderr.contains("for example ghost"),
         "{stderr}"
     );
     // The output stays literal.
@@ -990,10 +992,13 @@ fn keywords_match_whatever_their_case() {
     assert!(result.status.success(), "{stderr}");
     // Unsupported keywords are still reported as written.
     assert!(
-        stderr.contains("unsupported MTL property MAP_KS"),
+        stderr.contains("unsupported MTL properties ignored: 1, for example MAP_KS"),
         "{stderr}"
     );
-    assert!(stderr.contains("unsupported OBJ record CSTYPE"), "{stderr}");
+    assert!(
+        stderr.contains("unsupported OBJ records omitted: 1, for example CSTYPE"),
+        "{stderr}"
+    );
     let (root, _) = f.result();
     assert_eq!(root["meshes"][0]["name"], "Thing");
     let material = &root["materials"][0];

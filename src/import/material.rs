@@ -1,6 +1,6 @@
 //! Conservative Phong -> PBR policy: no inferred metals, explicit specular extension.
 use crate::shared::{
-    diagnostics::{safe, shown},
+    diagnostics::{safe, shown, Tally},
     failure::Context,
     references::References,
     Res,
@@ -238,6 +238,19 @@ fn color(rest: &str) -> Res<[f64; 3]> {
         finite(v[2])?.clamp(0., 1.),
     ])
 }
+/// Shared by all the libraries of a model, as a file can name any number of them.
+pub struct Warnings {
+    properties: Tally,
+    options: Tally,
+}
+impl Warnings {
+    pub fn new() -> Self {
+        Self {
+            properties: Tally::new("unsupported MTL properties ignored"),
+            options: Tally::new("unsupported map_Kd options ignored"),
+        }
+    }
+}
 /// Whose an OBJ or MTL file is, which decides what its references and errors mean.
 #[derive(Clone, Copy)]
 pub enum Origin<'a> {
@@ -251,6 +264,7 @@ pub fn load(
     references: &References,
     origin: Origin,
     materials: &mut HashMap<String, Material>,
+    warnings: &mut Warnings,
 ) -> Res<()> {
     let file = || match origin {
         Origin::Model => shown(path),
@@ -258,7 +272,6 @@ pub fn load(
     };
     let reader = BufReader::new(File::open(path).with_context(file)?);
     let mut current: Option<Material> = None;
-    let mut unsupported = std::collections::HashSet::new();
     for (line_no, line) in reader.lines().enumerate() {
         let line = line?;
         let line = line.split('#').next().unwrap().trim();
@@ -301,11 +314,7 @@ pub fn load(
                 // `Kt` is an alias some exporters write, read by Blender too.
                 "tf" | "kt" => match color(rest) {
                     Ok(tf) => m.transmission_filter = Some(tf),
-                    Err(e) => {
-                        if unsupported.insert(key.to_owned()) {
-                            crate::say!("Warning: {key} ignored in {}: {e}", file());
-                        }
-                    }
+                    Err(_) => warnings.properties.add(written),
                 },
                 "pm" => m.metallic = finite(rest)?.clamp(0., 1.),
                 "objtools_doublesided" => m.double_sided = rest == "1",
@@ -313,13 +322,7 @@ pub fn load(
                 "map_kd" => {
                     let (rest, ignored) = texture_options(rest, m)?;
                     for option in ignored {
-                        if unsupported.insert(format!("map_Kd {option}")) {
-                            crate::say!(
-                                "Warning: map_Kd {} is ignored in {}",
-                                safe(option),
-                                file()
-                            );
-                        }
+                        warnings.options.add(option);
                     }
                     let name = rest.trim_matches('"');
                     let beside = match origin {
@@ -331,15 +334,7 @@ pub fn load(
                     m.texture = Some(file.with_context(|| format!("Texture {}", safe(name)))?);
                 }
                 "" | "ka" => {}
-                _ => {
-                    if unsupported.insert(key.to_owned()) {
-                        crate::say!(
-                            "Warning: unsupported MTL property {} in {}",
-                            safe(written),
-                            file()
-                        );
-                    }
-                }
+                _ => warnings.properties.add(written),
             }
             Ok(())
         })();

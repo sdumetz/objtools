@@ -6,7 +6,7 @@ use super::{
     material::{self, Material, Origin},
 };
 use crate::shared::{
-    diagnostics::{safe, shown},
+    diagnostics::{safe, shown, Tally},
     failure::Context,
     references::References,
     Res,
@@ -86,9 +86,8 @@ fn floats(rest: &str, count: usize) -> Res<Vec<f64>> {
     }
     Ok(out)
 }
-fn warn_once(warned: &mut HashSet<String>, key: &str, message: &str) {
-    if !warned.contains(key) {
-        warned.insert(key.to_owned());
+fn warn_once(warned: &mut HashSet<&'static str>, key: &'static str, message: &str) {
+    if warned.insert(key) {
         crate::say!("Warning: {message}");
     }
 }
@@ -142,6 +141,9 @@ pub fn spool(
     let mut flat = false;
     let mut material = 0u32;
     let mut warned = HashSet::new();
+    let mut unsupported = Tally::new("unsupported OBJ records omitted");
+    let mut undefined = Tally::new("undefined materials, using the default");
+    let mut library_warnings = material::Warnings::new();
     let mut short_faces = 0u64;
     let mut record = Vec::new();
     let mut reader = BufReader::with_capacity(256 * 1024, File::open(source)?);
@@ -319,8 +321,15 @@ pub fn spool(
                 }
                 "mtllib" => {
                     let parent = source.parent().unwrap_or(Path::new("."));
-                    let mut load =
-                        |file: &Path| material::load(file, references, origin, &mut definitions);
+                    let mut load = |file: &Path| {
+                        material::load(
+                            file,
+                            references,
+                            origin,
+                            &mut definitions,
+                            &mut library_warnings,
+                        )
+                    };
                     // One file name with spaces in it, or several names.
                     let whole = libraries.resolve(parent, rest).ok();
                     if let Some(file) = whole.filter(|file| file.is_file()) {
@@ -374,14 +383,7 @@ pub fn spool(
                 // number, or a bare `s`, smooths them together again.
                 "s" => flat = rest.eq_ignore_ascii_case("off") || rest.parse::<u64>() == Ok(0),
                 "" | "g" => {}
-                _ => {
-                    if warned.insert(key.to_owned()) {
-                        crate::say!(
-                            "Warning: unsupported OBJ record {} is omitted",
-                            safe(written)
-                        );
-                    }
-                }
+                _ => unsupported.add(written),
             }
             Ok(())
         })();
@@ -406,10 +408,7 @@ pub fn spool(
         if let Some(def) = definitions.remove(&m.name) {
             *m = def;
         } else if m.name != "default" {
-            crate::say!(
-                "Warning: undefined material {}; using default",
-                safe(&m.name)
-            );
+            undefined.add(&m.name);
         }
     }
     Ok(scene)

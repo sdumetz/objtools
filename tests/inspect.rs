@@ -121,7 +121,7 @@ fn json_stdout_stays_parseable_with_warnings_and_progress() {
     );
     let out = f.run(&["inspect", "--json", "--progress"], "in.obj");
     assert!(out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("Warning: undefined material"));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("undefined materials"));
     let report: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(report["vertices"], 3);
 }
@@ -379,7 +379,7 @@ fn unknown_optional_extensions_warn_once_and_change_nothing() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(
         stderr,
-        "Warning: ignored 2 unsupported extensions: VENDOR_one, VENDOR_two\n"
+        "Warning: unsupported extensions ignored: 2, for example VENDOR_one, VENDOR_two\n"
     );
     let report: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(report["occupied_texels"], 24);
@@ -395,7 +395,7 @@ fn material_variants_warn_that_only_the_default_material_is_used() {
         String::from_utf8_lossy(&out.stderr),
         "Warning: material variants are not supported (KHR_materials_variants): \
          only each primitive's default material is used\n\
-         Warning: ignored 1 unsupported extensions: VENDOR_one\n"
+         Warning: unsupported extensions ignored: 1, for example VENDOR_one\n"
     );
 }
 #[test]

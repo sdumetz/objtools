@@ -1,5 +1,8 @@
 //! Which glTF extensions can be read, and the texture image they select.
-use crate::shared::{diagnostics::safe, Res};
+use crate::shared::{
+    diagnostics::{safe, Tally},
+    Res,
+};
 use serde_json::Value;
 /// Read or carried through by both commands. `inspect` applies the texture extensions and needs
 /// nothing from the others to compute its statistics; `import` keeps them all in its output.
@@ -64,16 +67,9 @@ pub fn check(root: &Value) -> Res<()> {
         );
         ignored.retain(|name| *name != VARIANTS);
     }
-    if !ignored.is_empty() {
-        crate::say!(
-            "Warning: ignored {} unsupported extensions: {}",
-            ignored.len(),
-            ignored
-                .iter()
-                .map(|name| safe(name))
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
+    let mut tally = Tally::new("unsupported extensions ignored");
+    for name in ignored {
+        tally.add(name);
     }
     Ok(())
 }

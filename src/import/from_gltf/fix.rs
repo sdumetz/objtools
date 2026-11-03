@@ -406,6 +406,7 @@ pub fn plan_images(
     let mut images = vec![Value::Null; ids.len()];
     let mut plans = Vec::new();
     let mut corrected = 0u64;
+    let mut composited = images::composited_tally();
     for (&old, &new) in &ids {
         let mut image = element(&gltf.root, "images", old)?.clone();
         let (path, embedded) = match gltf.image(old)? {
@@ -428,6 +429,7 @@ pub fn plan_images(
             &opts.input,
             &opts.output,
             workspace,
+            &mut composited,
         )?;
         if let Some(map) = image.as_object_mut() {
             map.remove("bufferView");

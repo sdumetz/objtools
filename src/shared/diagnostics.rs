@@ -7,6 +7,7 @@ use std::path::Path;
 /// Long enough for any message objtools composes. Text from a file is capped well below this.
 const MAX_LINE: usize = 512;
 const MAX_TEXT: usize = 64;
+const MAX_EXAMPLES: usize = 3;
 
 /// Writes one line to stderr, as `eprintln!` would.
 #[macro_export]
@@ -41,6 +42,49 @@ pub fn safe(text: &str) -> String {
         out.push_str("...");
     }
     out
+}
+/// One warning per kind of problem, however often a file repeats it: the count, and a few examples.
+/// It holds no more than those, so it doesn't grow with the file. It reports when dropped, so that
+/// what was found still shows if the import then fails.
+pub struct Tally {
+    what: &'static str,
+    count: u64,
+    examples: Vec<String>,
+}
+impl Tally {
+    /// `what` comes before the count: "undefined materials".
+    pub fn new(what: &'static str) -> Self {
+        Self {
+            what,
+            count: 0,
+            examples: Vec::new(),
+        }
+    }
+    /// `example` may come from the file.
+    pub fn add(&mut self, example: &str) {
+        self.count += 1;
+        if self.examples.len() < MAX_EXAMPLES {
+            let example = safe(example);
+            if !example.is_empty() && !self.examples.contains(&example) {
+                self.examples.push(example);
+            }
+        }
+    }
+    fn message(&self) -> Option<String> {
+        let (count, what) = (self.count, self.what);
+        let examples = match self.examples.join(", ") {
+            examples if examples.is_empty() => examples,
+            examples => format!(", for example {examples}"),
+        };
+        (count > 0).then(|| format!("Warning: {what}: {count}{examples}"))
+    }
+}
+impl Drop for Tally {
+    fn drop(&mut self) {
+        if let Some(message) = self.message() {
+            line(&message);
+        }
+    }
 }
 /// A path for a message: only its file name, so that the layout of the machine never shows, and
 /// a long path can't push the name past the cap.
@@ -104,6 +148,29 @@ mod tests {
         assert_eq!(shown(Path::new("/srv/job/textures/a.png")), "a.png");
         assert_eq!(shown(Path::new("textures/../a.png")), "a.png");
         assert_eq!(shown(Path::new("/")), "file");
+    }
+    #[test]
+    fn a_tally_counts_everything_and_keeps_a_few_examples() {
+        let mut tally = Tally::new("odd things");
+        assert_eq!(tally.message(), None);
+        for example in ["a", "a", "<b", "c", "d", "e"] {
+            tally.add(example);
+        }
+        assert_eq!(
+            tally.message().unwrap(),
+            "Warning: odd things: 6, for example a, ?b, c"
+        );
+    }
+    #[test]
+    fn a_tally_with_only_empty_names_gives_no_examples() {
+        let mut tally = Tally::new("odd things");
+        tally.add("");
+        assert_eq!(tally.message().unwrap(), "Warning: odd things: 1");
+        tally.add("a");
+        assert_eq!(
+            tally.message().unwrap(),
+            "Warning: odd things: 2, for example a"
+        );
     }
     #[test]
     fn a_message_stays_as_written() {

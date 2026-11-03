@@ -106,7 +106,7 @@ By default, `import` and `inspect` only follow a file reference in a model (a gl
 
 A reference may use `..` as long as it stays inside the folder. URLs and symlinks leading out are refused. An absolute path, which old exporters often write where a relative one belongs, is only used to look for a file of that name beside the file containing the reference. `--trusted` turns this off for a model you know: references may then point anywhere, including through symlinks, the lookup by name is only used when the absolute path doesn't exist, and `--images keep` may refer to any folder.
 
-Messages on stderr can be shown to whoever supplied the model. Paths are relative to the input's folder, and any other path is reduced to its file name, including the output's. A name from a file is cut to 64 characters, with anything but letters, digits, spaces and `. _ - / : , ( )` replaced by `?`. The texture names in the text report of `inspect` follow the same rule, whereas `--json` keeps them as they are, escaped as JSON.
+Messages on stderr can be shown to whoever supplied the model. A file is shown by its name, never its folder, and a reference by what the model wrote. Names from a file are cut to a short length, and characters that could drive a terminal, read as markup or hide text are replaced by `?`. A problem a file repeats gives one warning, with its count and up to three examples, once the file has been read. The texture names in the text report of `inspect` are cleaned the same way, whereas `--json` keeps them as they are, escaped as JSON.
 
 ## Exit codes
 
