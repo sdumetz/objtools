@@ -7,6 +7,7 @@ use super::{
 };
 use crate::shared::{
     disk::{map, Outputs},
+    failure::Context,
     gltf::uri,
     Res,
 };
@@ -438,7 +439,7 @@ fn write_with_limit(
         .collect();
     let transparent = transparency
         .join()
-        .map_err(|_| "Texture transparency scan panicked")??;
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))?;
     let mut material_ids = HashMap::new();
     let mut invisible = BTreeSet::new();
     for &(old_id, textured) in &used_materials {
@@ -447,7 +448,7 @@ fn write_with_limit(
         let mut blend = false;
         let texture = if let Some(path) = m.texture.as_ref().filter(|_| textured) {
             let path =
-                fs::canonicalize(path).map_err(|e| format!("Texture {}: {e}", path.display()))?;
+                fs::canonicalize(path).with_context(|| format!("Texture {}", path.display()))?;
             let plan = &image_plans[&path];
             blend = transparent.contains(&path);
             let image = match image_ids.get(&path) {

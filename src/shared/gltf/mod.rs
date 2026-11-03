@@ -7,6 +7,7 @@ pub mod matrix;
 
 use super::{
     disk::{map, parent},
+    failure::Context,
     Res,
 };
 pub use accessor::Accessor;
@@ -114,14 +115,14 @@ impl Gltf {
     /// `GLTFLoader`. Extensions are checked first, so a file needing an unsupported one reports
     /// that rather than a symptom such as a buffer without data.
     pub fn open(path: &Path, workspace: &Path) -> Res<Self> {
-        let in_file = |e| format!("{}: {e}", path.display());
-        let file = map(path).map_err(in_file)?;
+        let in_file = || path.display().to_string();
+        let file = map(path).with_context(in_file)?;
         let (mut root, mut bin): (Value, _) = if file.starts_with(b"glTF") {
-            let (json, bin) = glb_chunks(&file).map_err(in_file)?;
-            let root = serde_json::from_slice(&file[json]).map_err(|e| in_file(e.into()))?;
+            let (json, bin) = glb_chunks(&file).with_context(in_file)?;
+            let root = serde_json::from_slice(&file[json]).with_context(in_file)?;
             (root, bin.map(|range| (file, range)))
         } else {
-            let root = serde_json::from_slice(&file).map_err(|e| in_file(e.into()))?;
+            let root = serde_json::from_slice(&file).with_context(in_file)?;
             (root, None)
         };
         extensions::check(&root)?;
@@ -133,7 +134,7 @@ impl Gltf {
             let (map, range) = match buffer["uri"].as_str() {
                 Some(uri) if uri.starts_with("data:") => {
                     let file = workspace.join(format!("buffer-{i}"));
-                    let map = data_uri::decode(uri, &file).map_err(|e| format!("{label}: {e}"))?;
+                    let map = data_uri::decode(uri, &file).with_context(|| label.clone())?;
                     let whole = 0..map.len();
                     buffer.as_object_mut().unwrap().remove("uri");
                     (map, whole)
@@ -141,7 +142,7 @@ impl Gltf {
                 Some(uri) => {
                     let file = base.join(decode_uri(uri)?);
                     label = file.display().to_string();
-                    let map = map(&file).map_err(|e| format!("{label}: {e}"))?;
+                    let map = map(&file).with_context(|| label.clone())?;
                     let whole = 0..map.len();
                     (map, whole)
                 }
@@ -159,7 +160,7 @@ impl Gltf {
         for (i, image) in list.enumerate() {
             if let Some(uri) = image["uri"].as_str().filter(|u| u.starts_with("data:")) {
                 let file = workspace.join(format!("image-{i}"));
-                let map = data_uri::decode(uri, &file).map_err(|e| format!("Image {i}: {e}"))?;
+                let map = data_uri::decode(uri, &file).with_context(|| format!("Image {i}"))?;
                 embedded.insert(i, map);
                 image.as_object_mut().unwrap().remove("uri");
             }

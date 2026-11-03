@@ -1,5 +1,8 @@
 //! Disk-backed storage: private workspaces, and read-only mappings of finished files.
-use super::Res;
+use super::{
+    failure::{Context, JobDirectory},
+    Res,
+};
 use memmap2::Mmap;
 use std::{
     collections::hash_map::RandomState,
@@ -19,7 +22,9 @@ impl Workspace {
         // `RandomState` is the standard library's OS-seeded randomness.
         let random = RandomState::new().build_hasher().finish();
         let path = tmp_dir.join(format!("objtools-{}-{random:016x}", std::process::id()));
-        fs::create_dir(&path)?;
+        fs::create_dir(&path)
+            .map_err(JobDirectory)
+            .with_context(|| "Workspace directory".into())?;
         Ok(Self { path, keep })
     }
 }
@@ -46,7 +51,12 @@ pub struct Outputs {
 }
 impl Outputs {
     pub fn create(&mut self, path: &Path) -> Res<File> {
-        let f = OpenOptions::new().write(true).create_new(true).open(path)?;
+        let f = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map_err(JobDirectory)
+            .with_context(|| "Output directory".into())?;
         self.paths.push(path.to_owned());
         Ok(f)
     }

@@ -5,6 +5,7 @@ use super::{
     report::{Report, TextureReport},
 };
 use crate::shared::{
+    failure::Context,
     format::fmt_count,
     gltf::{container_size, element, extensions, index, Accessor, Gltf, Image},
     Res,
@@ -86,7 +87,7 @@ fn dimensions(gltf: &Gltf, id: usize, display_base: &Path) -> Res<(String, u32, 
                     .with_guessed_format()?
                     .into_dimensions()?)
             })()
-            .map_err(|e| format!("Texture {}: {e}", path.display()))?;
+            .with_context(|| format!("Texture {}", path.display()))?;
             let name = relative(&fs::canonicalize(&path)?, display_base);
             return Ok((name.display().to_string(), width, height));
         }

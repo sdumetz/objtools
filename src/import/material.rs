@@ -1,5 +1,5 @@
 //! Conservative Phong -> PBR policy: no inferred metals, explicit specular extension.
-use crate::shared::Res;
+use crate::shared::{failure::Context, Res};
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
@@ -233,7 +233,7 @@ pub fn load(
     texture_base: Option<&Path>,
     materials: &mut HashMap<String, Material>,
 ) -> Res<()> {
-    let reader = BufReader::new(File::open(path).map_err(|e| format!("{}: {e}", path.display()))?);
+    let reader = BufReader::new(File::open(path).with_context(|| path.display().to_string())?);
     let mut current: Option<Material> = None;
     let mut unsupported = std::collections::HashSet::new();
     for (line_no, line) in reader.lines().enumerate() {
@@ -313,7 +313,7 @@ pub fn load(
             }
             Ok(())
         })();
-        result.map_err(|e| format!("{}:{}: {e}", path.display(), line_no + 1))?;
+        result.with_context(|| format!("{}:{}", path.display(), line_no + 1))?;
     }
     if let Some(m) = current {
         materials.insert(m.name.clone(), m);

@@ -1153,3 +1153,43 @@ fn unportable_vertex_components_warn_instead_of_failing() {
     assert_eq!(colors[3][0], 0.);
     assert_eq!(colors[3][2], 1.);
 }
+#[test]
+fn exit_codes_separate_a_bad_file_from_a_bad_environment() {
+    let triangle = "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
+    let run = |f: &Fixture, args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_objtools"))
+            .arg("import")
+            .args(args)
+            .current_dir(&f.0)
+            .output()
+            .unwrap()
+            .status
+            .code()
+    };
+    let f = Fixture::new();
+    f.file("good.obj", triangle);
+    f.file("bad.obj", "v 0 0 oops\n");
+    f.file(
+        "texture.obj",
+        &format!("mtllib texture.mtl\nvt 0 0\nusemtl m\n{triangle}"),
+    );
+    f.file("texture.mtl", "newmtl m\nmap_Kd missing.png\n");
+    assert_eq!(run(&f, &["good.obj", "-o", "ok.gltf"]), Some(0));
+    assert_eq!(run(&f, &["bad.obj", "-o", "out.gltf"]), Some(1));
+    assert_eq!(run(&f, &["missing.obj", "-o", "out.gltf"]), Some(1));
+    assert_eq!(run(&f, &["texture.obj", "-o", "out.gltf"]), Some(1));
+    assert_eq!(run(&f, &["good.obj", "--no-such-option"]), Some(1));
+    // A directory the caller chose isn't the file's fault, even though it is "not found" too.
+    assert_eq!(run(&f, &["good.obj", "-o", "no/such/out.gltf"]), Some(4));
+    assert_eq!(
+        run(&f, &["good.obj", "-o", "out.gltf", "--tmp-dir", "no/such"]),
+        Some(4)
+    );
+    assert_eq!(
+        run(
+            &f,
+            &["good.obj", "-o", "no/such/out.gltf", "--tmp-dir", "."]
+        ),
+        Some(4)
+    );
+}

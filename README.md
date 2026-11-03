@@ -98,6 +98,18 @@ Supported glTF inputs are `.gltf` and `.glb`, with external, embedded or base64 
 
 Textures using `KHR_texture_basisu`, `EXT_texture_webp` or `EXT_texture_avif` are measured from the extension's image rather than its fallback, and only their headers are read. A file that requires an extension `inspect` doesn't support is rejected, which includes Draco and meshopt compression. Optional compression is skipped when the file also has uncompressed data, and any other unknown optional extension is ignored with a warning. Material variants (`KHR_materials_variants`) aren't supported, and a warning says so: occupancy comes only from each primitive's default material, so a texture only the variants use counts as unoccupied.
 
+## Exit codes
+
+| Code | Meaning |
+| ---- | ------- |
+| 0 | Success |
+| 1 | The input or the command line was rejected |
+| 3 | A resource limit was reached: the disk is full, or a quota or file-size limit |
+| 4 | Another problem with the machine, such as permissions or a missing output directory |
+| 101 | Internal error (a panic) |
+
+Codes 3 and 4 mean the file itself may be fine, and a retry elsewhere can succeed. Every failure exits through the same cleanup. A file-size limit (`ulimit -f`) only gives code 3 if SIGXFSZ is ignored, for instance with `trap '' XFSZ` before starting objtools: otherwise the signal kills the process and leaves its workspace and partial output behind.
+
 ## Working with large or georeferenced models
 
 - Keep the workspace on a real disk with ample free space. It defaults to the output directory for `import` and the input directory for `inspect`; use `--tmp-dir` to choose another location. An SSD helps with large imports. Temporary files are cleaned up automatically.

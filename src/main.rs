@@ -2,9 +2,18 @@ mod import;
 mod inspect;
 mod shared;
 
-use shared::Res;
-use std::env;
-fn main() -> Res<()> {
+use shared::{failure, Res};
+use std::{env, process::ExitCode};
+fn main() -> ExitCode {
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            ExitCode::from(failure::classify(&*e) as u8)
+        }
+    }
+}
+fn run() -> Res<()> {
     let mut args = env::args().skip(1);
     match args.next().as_deref() {
         None | Some("--help" | "-h") => {

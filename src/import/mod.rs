@@ -12,8 +12,12 @@ mod smooth;
 mod triangulate;
 mod vrml;
 
-use crate::shared::{disk::Workspace, Res};
-use std::path::PathBuf;
+use crate::shared::{
+    disk::{parent, Workspace},
+    failure::{Context, JobDirectory},
+    Res,
+};
+use std::{fs, path::PathBuf};
 #[derive(Default)]
 pub struct Options {
     pub input: PathBuf,
@@ -45,6 +49,10 @@ pub fn run(opts: Options) -> Res<()> {
     if opts.output.exists() || opts.output.with_extension("bin").exists() {
         return Err("Output .gltf or .bin already exists; choose a new output path".into());
     }
+    // With `--tmp-dir` elsewhere, a missing output directory would only show after the import.
+    fs::metadata(parent(&opts.output))
+        .map_err(JobDirectory)
+        .with_context(|| "Output directory".into())?;
     let workspace = Workspace::create(&opts.tmp_dir, opts.keep_tmp)?;
     if matches!(ext.as_str(), "gltf" | "glb") {
         return from_gltf::convert(&opts, &workspace.path);

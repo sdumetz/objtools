@@ -1,6 +1,6 @@
 //! Source image policy and optional decoding/encoding, one image at a time.
 use super::material::Material;
-use crate::shared::{disk::parent, gltf::uri, Res};
+use crate::shared::{disk::parent, failure::Context, gltf::uri, Res};
 use std::{
     collections::{HashMap, HashSet},
     fs::{self, File},
@@ -152,12 +152,12 @@ pub fn prepare_gltf_image(
     output: &Path,
     workspace: &Path,
 ) -> Res<Plan> {
-    let label = |e: &dyn std::fmt::Display| format!("Texture {}: {e}", image.path.display());
+    let label = || format!("Texture {}", image.path.display());
     let mut header = [0; 64];
-    let mut file = File::open(image.path).map_err(|e| label(&e))?;
+    let mut file = File::open(image.path).with_context(label)?;
     let mut read = 0;
     while read < header.len() {
-        match file.read(&mut header[read..]).map_err(|e| label(&e))? {
+        match file.read(&mut header[read..]).with_context(label)? {
             0 => break,
             n => read += n,
         }
@@ -170,14 +170,16 @@ pub fn prepare_gltf_image(
     };
     let convert = options.convert.unwrap_or(!valid);
     if !valid && !convert {
-        return Err(label(
-            &"unsupported glTF image format with --convert-images=false; enable conversion",
+        return Err(format!(
+            "{}: unsupported glTF image format with --convert-images=false; enable conversion",
+            label()
         )
         .into());
     }
     if convert && matches!(kind, Kind::Avif | Kind::Ktx2) {
-        return Err(label(
-            &"AVIF and KTX2 images can't be converted: this build has no decoder for them",
+        return Err(format!(
+            "{}: AVIF and KTX2 images can't be converted: this build has no decoder for them",
+            label()
         )
         .into());
     }
@@ -201,7 +203,7 @@ pub fn prepare_gltf_image(
     let content = if convert {
         let converted = workspace.join(&name);
         convert_image(image.path, &converted, options)
-            .map_err(|e| label(&format!("converting: {e}")))?;
+            .with_context(|| format!("{}: converting", label()))?;
         converted
     } else {
         image.path.to_owned()
@@ -211,7 +213,7 @@ pub fn prepare_gltf_image(
     } else {
         kind
     };
-    check_gltf_image(&content, checked).map_err(|e| label(&e))?;
+    check_gltf_image(&content, checked).with_context(label)?;
     let uri = if copy {
         uri(&name)
     } else {
@@ -296,7 +298,7 @@ pub fn prepare(
             continue;
         };
         let source =
-            fs::canonicalize(path).map_err(|e| format!("Texture {}: {e}", path.display()))?;
+            fs::canonicalize(path).with_context(|| format!("Texture {}", path.display()))?;
         if plans.contains_key(&source) {
             continue;
         }
@@ -336,12 +338,12 @@ pub fn prepare(
         let content = if convert {
             let converted = workspace.join(&name);
             convert_image(&source, &converted, options)
-                .map_err(|e| format!("Converting texture {}: {e}", source.display()))?;
+                .with_context(|| format!("Converting texture {}", source.display()))?;
             converted
         } else {
             source.clone()
         };
-        check_image(&content).map_err(|e| format!("Texture {}: {e}", source.display()))?;
+        check_image(&content).with_context(|| format!("Texture {}", source.display()))?;
         let uri = if copy {
             uri(&name)
         } else {

@@ -5,7 +5,7 @@ use super::{
     fixed::{parse_three_fixed, BBox},
     material::{self, Material},
 };
-use crate::shared::Res;
+use crate::shared::{failure::Context, Res};
 use std::{
     collections::{HashMap, HashSet},
     fs::File,
@@ -361,7 +361,7 @@ pub fn spool(
             }
             Ok(())
         })();
-        result.map_err(|e| format!("{}:{start_line}: {e}", source.display()))?;
+        result.with_context(|| format!("{}:{start_line}", source.display()))?;
         joined.clear();
         if eof {
             break;
