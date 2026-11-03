@@ -216,7 +216,7 @@ pub fn convert(opts: &Options, workspace: &std::path::Path, references: Referenc
     drop(dst);
     outputs.commit();
     if !opts.quiet {
-        eprintln!(
+        crate::say!(
             "Wrote {} ({} faces, {mesh_count} meshes, {} bytes of geometry)",
             opts.output.display(),
             geometry.faces,

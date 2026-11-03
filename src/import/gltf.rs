@@ -190,8 +190,8 @@ fn write_with_limit(
     };
     let quiet = options.quiet;
     if !quiet {
-        eprintln!("Origin: {}", format_triple(origin));
-        eprintln!(
+        crate::say!("Origin: {}", format_triple(origin));
+        crate::say!(
             "Bounds: {} (size {})",
             scene.bbox.range_str().unwrap_or_default(),
             scene.bbox.size_str().unwrap_or_default()
@@ -377,7 +377,7 @@ fn write_with_limit(
         }
         open = Some(p);
         if progress && face_count.is_multiple_of(1_000_000) {
-            eprintln!(
+            crate::say!(
                 "Converted {face_count} faces, {} binary bytes",
                 document.offset
             );
@@ -387,19 +387,19 @@ fn write_with_limit(
         document.close(p, &mut binary)?;
     }
     if splits > 0 {
-        eprintln!("Warning: {splits} primitives reached the {max_vertices}-vertex limit of 32-bit indices and were split");
+        crate::say!("Warning: {splits} primitives reached the {max_vertices}-vertex limit of 32-bit indices and were split");
     }
     if repaired_normals > 0 {
-        eprintln!("Warning: generated smooth normals for {repaired_normals} corners with zero-length source normals");
+        crate::say!("Warning: generated smooth normals for {repaired_normals} corners with zero-length source normals");
     }
     if textured_colors > 0 {
-        eprintln!("Warning: vertex colors on {textured_colors} textured faces are kept as _COLOR, which renderers ignore, since COLOR_0 would tint the texture a second time; use --no-color to drop them");
+        crate::say!("Warning: vertex colors on {textured_colors} textured faces are kept as _COLOR, which renderers ignore, since COLOR_0 would tint the texture a second time; use --no-color to drop them");
     }
     if skipped_degenerate > 0 {
-        eprintln!("Warning: skipped {skipped_degenerate} faces with zero area");
+        crate::say!("Warning: skipped {skipped_degenerate} faces with zero area");
     }
     if forced_polygons > 0 {
-        eprintln!("Warning: triangulated {forced_polygons} self-intersecting or otherwise non-simple faces by forced ear clipping; their triangles may overlap");
+        crate::say!("Warning: triangulated {forced_polygons} self-intersecting or otherwise non-simple faces by forced ear clipping; their triangles may overlap");
     }
     binary.flush()?;
     drop(binary);
@@ -407,7 +407,7 @@ fn write_with_limit(
         return Err("Input contains no supported triangle geometry".into());
     }
     if !center && !quiet {
-        eprintln!("Note: coordinates were encoded as float32 without recentering; use --center for georeferenced assets");
+        crate::say!("Note: coordinates were encoded as float32 without recentering; use --center for georeferenced assets");
     }
     let mut outputs = Outputs::default();
     let parent = output
@@ -481,7 +481,7 @@ fn write_with_limit(
         // writing `Tr` as opacity, and silently invisible objects would leave no clue why.
         // Glass (`illum 4`/`9`) keeps alpha 1, so `d 0` there, clear glass, is not flagged.
         if value["pbrMetallicRoughness"]["baseColorFactor"][3] == 0. && invisible.insert(old_id) {
-            eprintln!("Warning: material {} is fully transparent (d 0 or Tr 1) and will be invisible; check whether its exporter writes Tr as opacity", m.name);
+            crate::say!("Warning: material {} is fully transparent (d 0 or Tr 1) and will be invisible; check whether its exporter writes Tr as opacity", m.name);
         }
         if m.texture.is_some() && !textured {
             value["name"] = json!(format!("{}-untextured", m.name));
@@ -544,7 +544,7 @@ fn write_with_limit(
     drop(dst);
     outputs.commit();
     if !quiet {
-        eprintln!(
+        crate::say!(
             "Wrote {} ({face_count} faces, {} meshes, {} bytes of geometry)",
             output.display(),
             root["meshes"].as_array().unwrap().len(),

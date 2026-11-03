@@ -383,7 +383,7 @@ pub fn convert(input: &Path, output: &Path, tmp_dir: &Path, progress: bool) -> R
     while let Some(tok) = lex.next_token()? {
         if progress && lex.consumed >= next_progress {
             next_progress = lex.consumed + 100_000_000;
-            eprintln!("Read {}", fmt_bytes(lex.consumed));
+            crate::say!("Read {}", fmt_bytes(lex.consumed));
         }
 
         match tok {
@@ -561,7 +561,7 @@ pub fn convert(input: &Path, output: &Path, tmp_dir: &Path, progress: bool) -> R
     out.flush()?;
 
     if shape_count == 0 {
-        eprintln!("Warning: no Shape node found — the output contains no geometry.");
+        crate::say!("Warning: no Shape node found — the output contains no geometry.");
     }
 
     write_mtl(&mtl_path, &materials)
@@ -573,7 +573,7 @@ fn check_header(path: &Path) -> Res<()> {
     match f.read(&mut head) {
         Ok(n) if n == 5 && &head == b"#VRML" => Ok(()),
         Ok(_) => {
-            eprintln!(
+            crate::say!(
                 "Warning: {} does not start with `#VRML`; parsing it anyway.",
                 path.display()
             );
@@ -731,7 +731,7 @@ fn read_array(
                 Array::Colors => {
                     if !warned.colors {
                         warned.colors = true;
-                        eprintln!("Warning: VRML per-vertex colours are omitted.");
+                        crate::say!("Warning: VRML per-vertex colours are omitted.");
                     }
                 }
                 Array::CoordIndex | Array::TexCoordIndex | Array::NormalIndex => {
@@ -770,7 +770,7 @@ fn read_array(
 
     if arity > 0 && !group.is_empty() && !warned.ragged {
         warned.ragged = true;
-        eprintln!(
+        crate::say!(
             "Warning: a coordinate array held a partial tuple ({} leftover value(s)); ignored.",
             group.len()
         );
@@ -850,7 +850,7 @@ fn finish_shape(
         if cf.len() < 3 {
             if !warned.short_face {
                 warned.short_face = true;
-                eprintln!("Warning: face with fewer than 3 vertices skipped.");
+                crate::say!("Warning: face with fewer than 3 vertices skipped.");
             }
             continue;
         }

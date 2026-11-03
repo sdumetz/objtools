@@ -58,13 +58,13 @@ pub fn group(scene: &Scene, dir: &Path, progress: bool) -> Res<Vec<Group>> {
         groups[id].bytes += 12 + 24 * corners.len() as u64;
     }
     if untextured > 0 {
-        eprintln!("Warning: {untextured} faces with a textured material have no UVs; they use an untextured copy of it");
+        crate::say!("Warning: {untextured} faces with a textured material have no UVs; they use an untextured copy of it");
     }
     if !interleaved {
         return Ok(groups);
     }
     if progress {
-        eprintln!("Grouping {count} faces by object and material");
+        crate::say!("Grouping {count} faces by object and material");
     }
     let sorted_path = dir.join("faces-grouped");
     let file = OpenOptions::new()

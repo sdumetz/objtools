@@ -66,7 +66,7 @@ pub fn generate(scene: &Scene, positions: &[u8], dir: &Path, progress: bool) -> 
             }
         }
         if progress && count.is_multiple_of(1_000_000) {
-            eprintln!("Smoothing: accumulated {count} faces");
+            crate::say!("Smoothing: accumulated {count} faces");
         }
     }
     Ok(sums)

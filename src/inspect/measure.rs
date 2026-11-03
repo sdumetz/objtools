@@ -217,7 +217,7 @@ pub fn measure(
             skipped += u64::from(!target.triangle(tri, wrap, filter)?);
             rasterized += 1;
             if progress && rasterized.is_multiple_of(10_000_000) {
-                eprintln!(
+                crate::say!(
                     "Inspecting: rasterized {} UV triangles",
                     fmt_count(rasterized)
                 );
@@ -225,7 +225,7 @@ pub fn measure(
         }
     }
     if skipped > 0 {
-        eprintln!("Warning: {skipped} UV triangles repeating their texture more than 64 times were left out of occupancy");
+        crate::say!("Warning: {skipped} UV triangles repeating their texture more than 64 times were left out of occupancy");
     }
     let textures = textures
         .into_values()

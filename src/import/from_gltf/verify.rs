@@ -228,7 +228,7 @@ pub fn warn_fully_transparent_materials(materials: &Materials) {
         let alpha = &material["pbrMetallicRoughness"]["baseColorFactor"][3];
         if material["alphaMode"] == "BLEND" && alpha == 0. {
             let name = material["name"].as_str().unwrap_or("material");
-            eprintln!("Warning: material {name} is fully transparent and will be invisible");
+            crate::say!("Warning: material {name} is fully transparent and will be invisible");
         }
     }
 }

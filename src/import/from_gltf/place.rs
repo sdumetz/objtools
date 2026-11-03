@@ -206,14 +206,14 @@ pub fn measure(
         source_bounds.add(previous.to_source(max)?);
     }
     if !opts.quiet {
-        eprintln!("Origin: {}", format_triple(origin));
-        eprintln!(
+        crate::say!("Origin: {}", format_triple(origin));
+        crate::say!(
             "Bounds: {} (size {})",
             source_bounds.range_str().unwrap_or_default(),
             source_bounds.size_str().unwrap_or_default()
         );
         if !opts.center && !previous.centered {
-            eprintln!("Note: coordinates were encoded as float32 without recentering; use --center for georeferenced assets");
+            crate::say!("Note: coordinates were encoded as float32 without recentering; use --center for georeferenced assets");
         }
     }
     Ok(Placement {

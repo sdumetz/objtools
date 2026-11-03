@@ -622,3 +622,30 @@ fn keeping_images_never_writes_a_reference_outside_the_output_folder() {
         assert_eq!(root["images"][0]["uri"], "../t.png");
     }
 }
+
+const HOSTILE: &str = "\x1b[31m<img\x07";
+/// Nothing that could drive a terminal or read as markup, wherever it came from.
+#[track_caller]
+fn assert_harmless(stderr: &str) {
+    let hostile = |c: char| (c.is_control() && c != '\n') || matches!(c, '<' | '>' | '&');
+    assert!(!stderr.contains(hostile), "{stderr:?}");
+}
+#[test]
+fn text_from_the_file_cannot_drive_a_terminal() {
+    let u = Upload::new();
+    u.write(
+        "m.obj",
+        &format!("{HOSTILE} 1\nusemtl {HOSTILE}\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n"),
+    );
+    let out = u.run(&["import", "m.obj", "-o", "out.gltf"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    assert!(stderr.contains("undefined material"), "{stderr}");
+    assert_harmless(&stderr);
+}
+#[test]
+fn a_rejected_file_cannot_drive_a_terminal_through_its_error() {
+    let u = Upload::new();
+    u.write("m.obj", &format!("v 1{HOSTILE} 0 0\n"));
+    assert_harmless(&u.stderr_of(&["import", "m.obj", "-o", "out.gltf"]));
+}

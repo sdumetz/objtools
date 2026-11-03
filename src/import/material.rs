@@ -263,7 +263,7 @@ pub fn load(
                 "ni" => {
                     m.ior = finite(rest)?;
                     if m.ior < 1. {
-                        return Err("Ni must be >= 1".into());
+                        return Err("Ni must be at least 1".into());
                     }
                 }
                 "d" => {
@@ -281,7 +281,7 @@ pub fn load(
                     Ok(tf) => m.transmission_filter = Some(tf),
                     Err(e) => {
                         if unsupported.insert(key.to_owned()) {
-                            eprintln!("Warning: {key} ignored in {}: {e}", path.display());
+                            crate::say!("Warning: {key} ignored in {}: {e}", path.display());
                         }
                     }
                 },
@@ -292,7 +292,10 @@ pub fn load(
                     let (rest, ignored) = texture_options(rest, m)?;
                     for option in ignored {
                         if unsupported.insert(format!("map_Kd {option}")) {
-                            eprintln!("Warning: map_Kd {option} is ignored in {}", path.display());
+                            crate::say!(
+                                "Warning: map_Kd {option} is ignored in {}",
+                                path.display()
+                            );
                         }
                     }
                     let name = rest.trim_matches('"');
@@ -304,7 +307,7 @@ pub fn load(
                 "" | "ka" => {}
                 _ => {
                     if unsupported.insert(key.to_owned()) {
-                        eprintln!(
+                        crate::say!(
                             "Warning: unsupported MTL property {written} in {}",
                             path.display()
                         );

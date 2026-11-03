@@ -386,7 +386,7 @@ fn convert_image(source: &Path, destination: &Path, options: &Options) -> Res<()
             let rgb = if decoded.has_alpha() {
                 let mut rgba = decoded.to_rgba8();
                 if rgba.pixels().any(|p| p[3] != 255) {
-                    eprintln!("Warning: converting {} to JPG composites transparency onto white; use --image-format png to preserve alpha", source.display());
+                    crate::say!("Warning: converting {} to JPG composites transparency onto white; use --image-format png to preserve alpha", source.display());
                 }
                 for p in rgba.pixels_mut() {
                     for i in 0..3 {

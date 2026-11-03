@@ -1,3 +1,5 @@
+#![deny(clippy::print_stderr)]
+
 mod import;
 mod inspect;
 mod shared;
@@ -8,7 +10,7 @@ fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("Error: {e}");
+            crate::say!("Error: {e}");
             ExitCode::from(failure::classify(&*e) as u8)
         }
     }

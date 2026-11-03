@@ -59,13 +59,13 @@ pub fn check(root: &Value) -> Res<()> {
     let mut ignored = names("extensionsUsed");
     ignored.retain(|name| !SUPPORTED.contains(name) && !COMPRESSION.contains(name));
     if ignored.contains(&VARIANTS) {
-        eprintln!(
+        crate::say!(
             "Warning: material variants are not supported ({VARIANTS}): only each primitive's default material is used"
         );
         ignored.retain(|name| *name != VARIANTS);
     }
     if !ignored.is_empty() {
-        eprintln!(
+        crate::say!(
             "Warning: ignored {} unsupported extensions: {}",
             ignored.len(),
             ignored.join(", ")

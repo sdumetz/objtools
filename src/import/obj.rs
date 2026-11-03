@@ -84,7 +84,7 @@ fn floats(rest: &str, count: usize) -> Res<Vec<f64>> {
 fn warn_once(warned: &mut HashSet<String>, key: &str, message: &str) {
     if !warned.contains(key) {
         warned.insert(key.to_owned());
-        eprintln!("Warning: {message}");
+        crate::say!("Warning: {message}");
     }
 }
 /// OBJ vertex colours are display (sRGB) values; glTF `COLOR_0` is linear.
@@ -160,7 +160,7 @@ pub fn spool(
             line_no += 1;
         }
         if progress && bytes >= next_progress {
-            eprintln!(
+            crate::say!(
                 "Spooling OBJ: {}",
                 crate::shared::format::fmt_bytes(bytes as u64)
             );
@@ -367,7 +367,7 @@ pub fn spool(
                 "" | "g" => {}
                 _ => {
                     if warned.insert(key.to_owned()) {
-                        eprintln!("Warning: unsupported OBJ record {written} is omitted");
+                        crate::say!("Warning: unsupported OBJ record {written} is omitted");
                     }
                 }
             }
@@ -380,7 +380,7 @@ pub fn spool(
         }
     }
     if short_faces > 0 {
-        eprintln!("Warning: omitted {short_faces} faces with fewer than three corners");
+        crate::say!("Warning: omitted {short_faces} faces with fewer than three corners");
     }
     for writer in &mut attrs {
         writer.flush()?;
@@ -394,7 +394,7 @@ pub fn spool(
         if let Some(def) = definitions.remove(&m.name) {
             *m = def;
         } else if m.name != "default" {
-            eprintln!("Warning: undefined material {}; using default", m.name);
+            crate::say!("Warning: undefined material {}; using default", m.name);
         }
     }
     Ok(scene)

@@ -46,7 +46,7 @@ pub fn unsupported_extensions(root: &mut Value, declared: &BTreeSet<String>) {
     dropped.retain(|name| !declared.contains(name) || extensions::is_compression(name));
     if !dropped.is_empty() {
         let list = dropped.iter().cloned().collect::<Vec<_>>().join(", ");
-        eprintln!(
+        crate::say!(
             "Warning: dropped {} extensions from the output: {list}",
             dropped.len()
         );
@@ -72,10 +72,10 @@ pub fn primitives_without_triangles(meshes: &mut [Value]) {
         });
     }
     if lines > 0 {
-        eprintln!("Warning: omitted {lines} primitives of points or lines");
+        crate::say!("Warning: omitted {lines} primitives of points or lines");
     }
     if no_position > 0 {
-        eprintln!("Warning: omitted {no_position} primitives without POSITION");
+        crate::say!("Warning: omitted {no_position} primitives without POSITION");
     }
 }
 /// `--no-color`.

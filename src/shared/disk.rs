@@ -31,7 +31,7 @@ impl Workspace {
 impl Drop for Workspace {
     fn drop(&mut self) {
         if self.keep {
-            eprintln!("Kept workspace: {}", self.path.display());
+            crate::say!("Kept workspace: {}", self.path.display());
         } else {
             let _ = fs::remove_dir_all(&self.path);
         }

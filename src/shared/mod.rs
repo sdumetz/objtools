@@ -1,4 +1,5 @@
 //! Code used by more than one command.
+pub mod diagnostics;
 pub mod disk;
 pub mod failure;
 pub mod format;
