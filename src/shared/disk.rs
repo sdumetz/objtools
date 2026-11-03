@@ -2,11 +2,11 @@
 use super::Res;
 use memmap2::Mmap;
 use std::{
+    collections::hash_map::RandomState,
     fs::{self, File, OpenOptions},
+    hash::{BuildHasher, Hasher},
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
 };
-static SEQ: AtomicU64 = AtomicU64::new(0);
 /// A private directory removed on drop, including when a command bails out early.
 pub struct Workspace {
     pub path: PathBuf,
@@ -14,11 +14,11 @@ pub struct Workspace {
 }
 impl Workspace {
     pub fn create(tmp_dir: &Path, keep: bool) -> Res<Self> {
-        let path = tmp_dir.join(format!(
-            "objtools-{}-{}",
-            std::process::id(),
-            SEQ.fetch_add(1, Ordering::Relaxed)
-        ));
+        // The process ID alone repeats in every PID namespace, so a killed container's leftovers
+        // would block the next job. It stays in the name to trace a leftover to its process.
+        // `RandomState` is the standard library's OS-seeded randomness.
+        let random = RandomState::new().build_hasher().finish();
+        let path = tmp_dir.join(format!("objtools-{}-{random:016x}", std::process::id()));
         fs::create_dir(&path)?;
         Ok(Self { path, keep })
     }
@@ -69,4 +69,25 @@ pub fn map(path: &Path) -> Res<Mmap> {
     // SAFETY: callers map workspace spools once they are complete, or the buffers of a model
     // being inspected; nothing is expected to truncate or rewrite them while mapped.
     Ok(unsafe { Mmap::map(&File::open(path)?)? })
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::env::temp_dir;
+    fn fixture(name: &str) -> PathBuf {
+        let dir = temp_dir().join(format!("objtools-disk-{name}-{}", std::process::id()));
+        fs::create_dir(&dir).unwrap();
+        dir
+    }
+    #[test]
+    fn workspaces_in_one_process_get_different_names() {
+        let dir = fixture("distinct");
+        let (a, b) = (
+            Workspace::create(&dir, false).unwrap(),
+            Workspace::create(&dir, false).unwrap(),
+        );
+        assert_ne!(a.path, b.path);
+        drop((a, b));
+        fs::remove_dir_all(&dir).unwrap();
+    }
 }
