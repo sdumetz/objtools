@@ -44,13 +44,21 @@ impl References {
         let base = non_empty(base);
         let written = reference.replace('\\', "/");
         let Some(root) = &self.root else {
-            return Ok(base.join(written));
+            // Windows reads the path itself, and `\\\\?\\` only means what it says with backslashes.
+            let file = base.join(if cfg!(windows) { reference } else { &written });
+            let beside = name_of_absolute(&written).map(|name| base.join(name));
+            return Ok(beside
+                .filter(|beside| !file.exists() && beside.exists())
+                .unwrap_or(file));
         };
+        // Decided from the text alone, so the path of a refused reference is never looked up.
+        let base = fs::canonicalize(base).map_err(|_| Refused)?;
+        if let Some(name) = name_of_absolute(&written) {
+            return regular_file_inside(root, &base.join(name));
+        }
         if !looks_relative(&written) {
             return Err(Refused);
         }
-        // Decided from the text alone, so the path of a refused reference is never looked up.
-        let base = fs::canonicalize(base).map_err(|_| Refused)?;
         let depth = base.strip_prefix(root).map_err(|_| Refused)?;
         if climbs_out(&written, depth.components().count()) {
             return Err(Refused);
@@ -64,6 +72,24 @@ fn non_empty(dir: &Path) -> &Path {
     } else {
         dir
     }
+}
+/// The file name to look for beside the referencing file, when the reference is an absolute path.
+/// Old exporters write the path a file had on the author's machine where a relative one belongs.
+/// Only the name goes any further, so this reaches nothing a relative reference couldn't.
+fn name_of_absolute(written: &str) -> Option<&str> {
+    let drive = written.split_once(':').filter(|(prefix, _)| {
+        prefix.len() == 1 && prefix.starts_with(|c: char| c.is_ascii_alphabetic())
+    });
+    let path = match drive {
+        Some((_, path)) => path,
+        None if written.starts_with('/') => written,
+        None => return None,
+    };
+    let name = path.rsplit('/').next()?;
+    let usable = !matches!(name, "" | "." | "..")
+        && !name.contains('\0')
+        && !(cfg!(windows) && name.contains(':'));
+    usable.then_some(name)
 }
 /// A relative path: no root, drive letter, URI scheme or NUL byte.
 fn looks_relative(written: &str) -> bool {
@@ -165,12 +191,53 @@ mod tests {
         assert_eq!(f.found("tex", "../../outside/s.txt"), None);
     }
     #[test]
+    fn an_absolute_path_is_looked_for_by_name_beside_the_referencing_file() {
+        let f = Fixture::new("beside");
+        let m = fs::canonicalize(f.job().join("m.bin")).unwrap();
+        let a = fs::canonicalize(f.job().join("tex/a.png")).unwrap();
+        for reference in [
+            "C:\\Users\\bob\\m.bin",
+            "C:/Users/bob/m.bin",
+            "C:m.bin",
+            "/home/bob/m.bin",
+            "\\\\server\\share\\m.bin",
+            m.to_str().unwrap(),
+        ] {
+            assert_eq!(f.found("", reference).as_ref(), Some(&m), "{reference}");
+        }
+        assert_eq!(f.found("tex", "C:\\Users\\bob\\a.png").unwrap(), a);
+        // Beside the referencing file only, not in the folders around it.
+        assert_eq!(f.found("tex", "C:\\Users\\bob\\m.bin"), None);
+        assert_eq!(f.found("", "C:\\Users\\bob\\a.png"), None);
+        // Not a name at all, or not a file.
+        for reference in ["/", "C:\\", "C:", "/x/..", "/x/.", "/tex", "C:\\x\\a\0b"] {
+            assert_eq!(f.found("", reference), None, "{reference:?}");
+        }
+    }
+    #[test]
+    fn only_absolute_paths_are_retried() {
+        let f = Fixture::new("relative");
+        for reference in [
+            "sub/dir/m.bin",
+            "../outside/m.bin",
+            "http://x/m.bin",
+            "file:///x/m.bin",
+        ] {
+            assert_eq!(f.found("", reference), None, "{reference}");
+        }
+    }
+    #[cfg(unix)]
+    #[test]
+    fn the_retry_is_held_to_the_same_checks() {
+        use std::os::unix::fs::symlink;
+        let f = Fixture::new("retry");
+        symlink(f.0.join("outside/s.txt"), f.job().join("s.txt")).unwrap();
+        assert_eq!(f.found("", "C:\\Users\\bob\\s.txt"), None);
+    }
+    #[test]
     fn absolute_and_remote_references_are_refused() {
         let f = Fixture::new("absolute");
-        let absolute = fs::canonicalize(f.job().join("m.bin")).unwrap();
-        let absolute = absolute.to_str().unwrap();
         for reference in [
-            absolute,
             "/etc/passwd",
             "C:\\Windows\\win.ini",
             "C:/Windows/win.ini",
@@ -234,5 +301,22 @@ mod tests {
         let refs = References::unrestricted();
         let path = refs.resolve(Path::new("base"), "../x\\y.png").unwrap();
         assert_eq!(path, Path::new("base/../x/y.png"));
+    }
+    #[test]
+    fn unrestricted_absolute_paths_prefer_what_they_name() {
+        let f = Fixture::new("unrestricted");
+        let refs = References::unrestricted();
+        let job = f.job();
+        let outside = fs::canonicalize(f.0.join("outside/s.txt")).unwrap();
+        fs::write(job.join("s.txt"), "beside").unwrap();
+        let found = refs.resolve(&job, outside.to_str().unwrap()).unwrap();
+        assert_eq!(found, outside);
+        let found = refs.resolve(&job, "/no/such/folder/s.txt").unwrap();
+        assert_eq!(found, job.join("s.txt"));
+        // Nothing beside it either: the real path stays, so that the real error is reported.
+        let absolute = Path::new("/no/such/folder/other.txt");
+        let found = refs.resolve(&job, absolute.to_str().unwrap()).unwrap();
+        // Joined, because on Windows a path from the root takes the drive of what it's joined to.
+        assert_eq!(found, job.join(absolute));
     }
 }

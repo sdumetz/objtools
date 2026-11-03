@@ -104,7 +104,7 @@ Textures using `KHR_texture_basisu`, `EXT_texture_webp` or `EXT_texture_avif` ar
 
 By default, `import` and `inspect` only follow a file reference in a model (a glTF buffer or image, an OBJ `mtllib`, an MTL `map_Kd`, a VRML `url`) to a regular file inside the input's folder. A model can't read anything else on the machine, and a reference that fails gets the same message whether the file is missing or forbidden. A texture that can't be reached fails the import, as a missing one does.
 
-A reference may use `..` as long as it stays inside the folder. Absolute paths, drive letters, URLs and symlinks leading out are refused. `--trusted` turns this off for a model you know: references may then point anywhere, including through symlinks.
+A reference may use `..` as long as it stays inside the folder. URLs and symlinks leading out are refused. An absolute path, which old exporters often write where a relative one belongs, is only used to look for a file of that name beside the file containing the reference. `--trusted` turns this off for a model you know: references may then point anywhere, including through symlinks, and the lookup by name is only used when the absolute path doesn't exist.
 
 ## Exit codes
 

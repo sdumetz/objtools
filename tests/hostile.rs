@@ -314,6 +314,8 @@ fn gltf_with_image(uri: &str) -> String {
 const TEXTURED_OBJ: &str =
     "mtllib in.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 0 1\nusemtl m\nf 1/1 2/2 3/3\n";
 fn vrml_with_url(url: &str) -> String {
+    // A VRML string escapes with a backslash, so a literal one is written twice.
+    let url = url.replace('\\', "\\\\");
     format!(
         "#VRML V2.0 utf8\nShape {{ appearance Appearance {{ texture ImageTexture {{ url \"{url}\" }} }}\n\
          geometry IndexedFaceSet {{ coord Coordinate {{ point [0 0 0, 1 0 0, 0 1 0] }} coordIndex [0 1 2 -1]\n\
@@ -507,4 +509,64 @@ fn a_vrml_texture_is_found_when_the_workspace_is_elsewhere() {
     let out = u.run(&["import", "in.wrl", "-o", "out.gltf", "--tmp-dir", ".."]);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "{stderr}");
+}
+#[test]
+fn an_absolute_path_from_an_old_exporter_finds_the_file_beside_the_model() {
+    for (kind, secret) in KINDS {
+        for written in [
+            format!("C:\\Users\\bob\\{secret}"),
+            format!("/home/bob/{secret}"),
+        ] {
+            let u = Upload::new();
+            let name = u.job().join(secret);
+            fs::copy(u.0 .0.join("outside").join(secret), &name).unwrap();
+            let input = write_reference(&u, kind, &written);
+            for args in [
+                ["import", input, "-o", "out.gltf"].as_slice(),
+                &["inspect", input],
+            ] {
+                let out = u.run(args);
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                assert!(out.status.success(), "{kind:?} {written}: {stderr}");
+            }
+        }
+    }
+}
+#[test]
+fn a_real_absolute_path_only_ever_opens_the_copy_in_the_folder() {
+    let u = Upload::new();
+    let outside = fs::canonicalize(u.0 .0.join("outside/secret.png")).unwrap();
+    image::RgbImage::new(8, 8)
+        .save(u.job().join("secret.png"))
+        .unwrap();
+    let written = outside.to_str().unwrap().replace('\\', "/");
+    let input = write_reference(&u, Kind::MapKd, &written);
+    let out = u.run(&["inspect", input, "--json"]);
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    // The outside copy is 4 by 4.
+    assert_eq!(report["textures"][0]["width"], 8, "{report}");
+}
+#[test]
+fn a_relative_path_is_not_retried_by_name() {
+    for (kind, secret) in KINDS {
+        let u = Upload::new();
+        fs::copy(u.0 .0.join("outside").join(secret), u.job().join(secret)).unwrap();
+        let input = write_reference(&u, kind, &format!("sub/dir/{secret}"));
+        let stderr = u.stderr_of(&["import", input, "-o", "out.gltf"]);
+        assert!(stderr.contains(REFUSED), "{kind:?}: {stderr}");
+    }
+}
+#[test]
+fn a_library_named_by_an_absolute_path_with_spaces_is_found() {
+    let u = Upload::new();
+    u.write("in.mtl", "newmtl m\nKd 1 0 0\n");
+    u.write(
+        "in.obj",
+        "mtllib C:\\My Files\\in.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nusemtl m\nf 1 2 3\n",
+    );
+    let out = u.run(&["import", "in.obj", "-o", "out.gltf"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    let root: Value = serde_json::from_slice(&fs::read(u.job().join("out.gltf")).unwrap()).unwrap();
+    assert!(root["materials"][0]["pbrMetallicRoughness"]["baseColorFactor"].is_array());
 }
