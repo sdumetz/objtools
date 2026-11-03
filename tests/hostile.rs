@@ -733,6 +733,18 @@ fn encoded_uris_are_decoded_exactly_once() {
         let input = write_reference(&u, Kind::Buffer, uri);
         u.assert_refused(input);
     }
+    // Not a reference at all, so it isn't given the same answer, and nothing is looked up.
+    for uri in ["%zz", "%", "m.bin%"] {
+        let u = Upload::new();
+        let input = write_reference(&u, Kind::Buffer, uri);
+        for args in [
+            ["import", input, "-o", "out.gltf"].as_slice(),
+            &["inspect", input],
+        ] {
+            let stderr = u.stderr_of(args);
+            assert!(stderr.contains("Error: "), "{uri}: {stderr}");
+        }
+    }
 }
 /// Each command says the same about both, apart from the reference as written.
 #[track_caller]
@@ -866,6 +878,158 @@ fn a_trusted_reference_fails_with_the_real_reason() {
             assert!(stderr.contains("os error"), "{kind:?}: {stderr}");
             assert!(!stderr.contains("outside"), "{kind:?}: {stderr}");
         }
+    }
+}
+#[test]
+fn a_name_that_looks_encoded_stays_a_name() {
+    // A real file in the folder. Decoded a second time on the way back in, it would lead out.
+    let name = |secret: &str| format!("..%2Foutside%2F{secret}");
+    for (kind, secret) in KINDS {
+        let u = Upload::new();
+        write_own_copy(&u, &name(secret), secret);
+        // A URI has to encode its own percent signs to name this file.
+        let uri = matches!(
+            kind,
+            Kind::Buffer | Kind::Image | Kind::GlbBuffer | Kind::GlbImage
+        );
+        let reference = if uri {
+            name(secret).replace('%', "%25")
+        } else {
+            name(secret)
+        };
+        let input = write_reference(&u, kind, &reference);
+        u.assert_followed_and_contained(input, &format!("{kind:?}"));
+    }
+}
+#[test]
+fn an_image_an_extension_selects_stays_in_the_folder() {
+    for extension in ["EXT_texture_webp", "EXT_texture_avif", "KHR_texture_basisu"] {
+        let u = Upload::new();
+        uv_buffer(&u);
+        write_own_copy(&u, "own.png", "own.png");
+        let mut root: Value = serde_json::from_str(&gltf_with_image("own.png")).unwrap();
+        root["images"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"uri": "../outside/secret.png"}));
+        root["textures"][0]["extensions"] = json!({extension: {"source": 1}});
+        root["extensionsUsed"] = json!([extension]);
+        u.write("in.gltf", &root.to_string());
+        u.assert_refused("in.gltf");
+    }
+}
+#[test]
+fn every_texture_slot_stays_in_the_folder() {
+    for (slot, material) in [
+        ("normal", json!({"normalTexture": {"index": 0}})),
+        ("occlusion", json!({"occlusionTexture": {"index": 0}})),
+        ("emissive", json!({"emissiveTexture": {"index": 0}})),
+        (
+            "metallic",
+            json!({"pbrMetallicRoughness": {"metallicRoughnessTexture": {"index": 0}}}),
+        ),
+        (
+            "extension",
+            json!({"extensions": {"KHR_materials_clearcoat": {"clearcoatTexture": {"index": 0}}}}),
+        ),
+    ] {
+        let u = Upload::new();
+        uv_buffer(&u);
+        let mut root: Value =
+            serde_json::from_str(&gltf_with_image("../outside/secret.png")).unwrap();
+        root["materials"] = json!([material]);
+        root["extensionsUsed"] = json!(["KHR_materials_clearcoat"]);
+        u.write("in.gltf", &root.to_string());
+        let stderr = u.stderr_of(&["import", "in.gltf", "-o", "out.gltf"]);
+        assert!(stderr.contains(REFUSED), "{slot}: {stderr}");
+    }
+}
+#[test]
+fn an_image_nothing_uses_is_not_published() {
+    let u = Upload::new();
+    uv_buffer(&u);
+    let mut root: Value = serde_json::from_str(&gltf_with_image("../outside/secret.png")).unwrap();
+    root["materials"] = json!([{}]);
+    root["textures"] = json!([]);
+    u.write("in.gltf", &root.to_string());
+    let out = u.run(&["import", "in.gltf", "-o", "out.gltf"]);
+    assert_eq!(out.status.code(), Some(0));
+    let output: Value =
+        serde_json::from_slice(&fs::read(u.job().join("out.gltf")).unwrap()).unwrap();
+    assert!(
+        output["images"].as_array().is_none_or(Vec::is_empty),
+        "{output}"
+    );
+}
+#[test]
+fn nothing_in_a_model_is_run_or_included() {
+    // OBJ can name a command to run and another file to read, and VRML another model to read.
+    let u = Upload::new();
+    u.write(
+        "in.obj",
+        &format!("csh touch pwned\ncall ../outside/secret.obj\n{TRIANGLE}"),
+    );
+    u.write(
+        "in.wrl",
+        &format!(
+            "#VRML V2.0 utf8\nInline {{ url \"../outside/secret.wrl\" }}\n{}",
+            vrml_with_url("../outside/secret.png").replace("../outside/secret.png", "t.png")
+        ),
+    );
+    write_own_copy(&u, "t.png", "t.png");
+    for args in [
+        ["import", "in.obj", "-o", "obj.gltf"].as_slice(),
+        &["inspect", "in.obj"],
+        &["import", "in.wrl", "-o", "wrl.gltf"],
+        &["inspect", "in.wrl"],
+    ] {
+        let out = u.run(args);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(0), "{args:?}: {stderr}");
+    }
+    assert!(!u.job().join("pwned").exists());
+}
+#[test]
+fn a_line_added_through_a_vrml_url_is_held_to_the_same_rules() {
+    write_vrml_url_lines("t.png\nmap_Kd ../outside/secret.png");
+    write_vrml_url_lines("t.png\r\nmap_Kd ../outside/secret.png");
+}
+fn write_vrml_url_lines(url: &str) {
+    // A string can hold a newline, which then starts a line of the generated library.
+    let u = Upload::new();
+    write_own_copy(&u, "t.png", "t.png");
+    u.write("in.wrl", &vrml_with_url(url));
+    u.assert_refused("in.wrl");
+}
+#[cfg(unix)]
+#[test]
+fn a_link_planted_at_an_output_name_is_not_written_through() {
+    use std::os::unix::fs::symlink;
+    for (planted, leads_to) in [
+        ("out.gltf", "written.gltf"),
+        ("out.bin", "written.bin"),
+        ("out_texture_0.png", "written.png"),
+        // One that exists is as tempting as one that doesn't.
+        ("out.gltf", "secret.bin"),
+        ("out.bin", "secret.bin"),
+        ("out_texture_0.png", "secret.bin"),
+    ] {
+        let u = Upload::new();
+        write_own_copy(&u, "t.png", "t.png");
+        u.write("in.obj", TEXTURED_OBJ);
+        u.write("in.mtl", "newmtl m\nmap_Kd t.png\n");
+        let outside = u.0 .0.join("outside");
+        let before = fs::read(outside.join("secret.bin")).unwrap();
+        symlink(outside.join(leads_to), u.job().join(planted)).unwrap();
+        // Copied, so that the texture has a name to write to.
+        let out = u.run(&["import", "in.obj", "-o", "out.gltf", "--images", "copy"]);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        // Seen before starting if it leads somewhere, and when writing if it doesn't.
+        assert!(
+            matches!(out.status.code(), Some(1 | 4)),
+            "{planted} to {leads_to}: {stderr}"
+        );
+        assert_eq!(fs::read(outside.join("secret.bin")).unwrap(), before);
     }
 }
 #[test]
