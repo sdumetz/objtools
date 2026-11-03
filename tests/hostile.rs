@@ -307,6 +307,32 @@ impl Upload {
             assert!(!bytes.windows(CANARY.len()).any(|w| w == CANARY), "{name}");
         }
     }
+    /// Followed by both commands, in each way of placing images, with nothing published that
+    /// leads out of the output's directory.
+    #[track_caller]
+    fn assert_followed_and_contained(&self, input: &str, case: &str) {
+        let out = self.run(&["inspect", input, "--json"]);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(0), "{case}: {stderr}");
+        let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+        if let Some(texture) = report["textures"].as_array().and_then(|t| t.first()) {
+            assert_eq!(texture["width"], 8, "{case}: {report}");
+        }
+        fs::create_dir_all(self.job().join("elsewhere")).unwrap();
+        for (output, extra) in [
+            ("auto.gltf", [].as_slice()),
+            ("keep.gltf", ["--images", "keep"].as_slice()),
+            ("copy.gltf", ["--images", "copy"].as_slice()),
+            ("elsewhere/auto.gltf", [].as_slice()),
+        ] {
+            let mut args = vec!["import", input, "-o", output];
+            args.extend_from_slice(extra);
+            let out = self.run(&args);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert_eq!(out.status.code(), Some(0), "{case}: {args:?}: {stderr}");
+            assert_self_contained(&self.job().join(output));
+        }
+    }
     fn assert_followed_when_trusted(&self, input: &str) {
         let out = self.run(&["import", input, "-o", "out.gltf", "--trusted"]);
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -382,9 +408,32 @@ fn vrml_with_url(url: &str) -> String {
          texCoord TextureCoordinate {{ point [0 0, 1 0, 0 1] }} texCoordIndex [0 1 2 -1] }} }}\n"
     )
 }
-/// Writes `in.*` referring to `reference` as one of the five kinds of reference, and returns its name.
+/// A GLB holding `root` as its JSON and no binary chunk, so its buffers are all external.
+fn glb(root: &str) -> Vec<u8> {
+    let mut json = root.as_bytes().to_vec();
+    json.resize(json.len().next_multiple_of(4), b' ');
+    let length = 12 + 8 + json.len() as u32;
+    let mut bytes = b"glTF".to_vec();
+    for field in [2, length, json.len() as u32, 0x4E4F_534A] {
+        bytes.extend_from_slice(&u32::to_le_bytes(field));
+    }
+    bytes.extend(json);
+    bytes
+}
+/// Writes `in.*` referring to `reference` as one of the kinds of reference, and returns its name.
 fn write_reference(u: &Upload, kind: Kind, reference: &str) -> &'static str {
     match kind {
+        Kind::GlbBuffer => {
+            let bytes = glb(&gltf_with_buffer(reference));
+            fs::write(u.job().join("in.glb"), bytes).unwrap();
+            "in.glb"
+        }
+        Kind::GlbImage => {
+            uv_buffer(u);
+            let bytes = glb(&gltf_with_image(reference));
+            fs::write(u.job().join("in.glb"), bytes).unwrap();
+            "in.glb"
+        }
         Kind::Buffer => {
             u.write("in.gltf", &gltf_with_buffer(reference));
             "in.gltf"
@@ -416,17 +465,220 @@ fn write_reference(u: &Upload, kind: Kind, reference: &str) -> &'static str {
 enum Kind {
     Buffer,
     Image,
+    GlbBuffer,
+    GlbImage,
     Mtllib,
     MapKd,
     Vrml,
 }
-const KINDS: [(Kind, &str); 5] = [
+const KINDS: [(Kind, &str); 7] = [
     (Kind::Buffer, "secret.bin"),
     (Kind::Image, "secret.png"),
+    (Kind::GlbBuffer, "secret.bin"),
+    (Kind::GlbImage, "secret.png"),
     (Kind::Mtllib, "secret.mtl"),
     (Kind::MapKd, "secret.png"),
     (Kind::Vrml, "secret.png"),
 ];
+/// Names `secret` after what the file's kind expects, at `SECRET`, and beside it `EXT` for the
+/// model's own file of that kind.
+fn spelled(reference: &str, secret: &str) -> String {
+    let extension = secret.rsplit('.').next().unwrap();
+    reference
+        .replace("SECRET", secret)
+        .replace("EXT", extension)
+}
+/// A file of the kind `name` says, told from the one in `outside` by its content: the buffer has
+/// no canary, the image is 8 by 8 rather than 4 by 4, and the library has a different material.
+fn write_own_copy(u: &Upload, name: &str, like: &str) {
+    let path = u.job().join(name);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    match like.rsplit('.').next().unwrap() {
+        "bin" => fs::write(path, positions()).unwrap(),
+        "mtl" => fs::write(path, "newmtl own\nKd 0 1 0\n").unwrap(),
+        _ => {
+            let mut bytes = std::io::Cursor::new(Vec::new());
+            image::RgbImage::new(8, 8)
+                .write_to(&mut bytes, image::ImageFormat::Png)
+                .unwrap();
+            fs::write(path, bytes.into_inner()).unwrap();
+        }
+    }
+}
+/// Percent-decoded, as whatever reads a published glTF will do it once.
+fn decoded_uri(uri: &str) -> String {
+    let bytes = uri.as_bytes();
+    let (mut out, mut i) = (Vec::new(), 0);
+    while i < bytes.len() {
+        let hex = (bytes[i] == b'%')
+            .then(|| uri.get(i + 1..i + 3))
+            .flatten()
+            .and_then(|hex| u8::from_str_radix(hex, 16).ok());
+        out.push(hex.unwrap_or(bytes[i]));
+        i += if hex.is_some() { 3 } else { 1 };
+    }
+    String::from_utf8(out).unwrap()
+}
+/// What makes an output safe to publish: every URI in it leads to a file beneath its directory.
+#[track_caller]
+fn assert_self_contained(output: &std::path::Path) {
+    let root: Value = serde_json::from_slice(&fs::read(output).unwrap()).unwrap();
+    let dir = fs::canonicalize(output.parent().unwrap()).unwrap();
+    for list in ["buffers", "images"] {
+        for item in root[list].as_array().into_iter().flatten() {
+            let Some(uri) = item["uri"].as_str() else {
+                continue;
+            };
+            let file = decoded_uri(uri);
+            assert!(!file.contains('\\') && !file.starts_with('/'), "{uri}");
+            let file = fs::canonicalize(dir.join(file)).expect(uri);
+            assert!(file.starts_with(&dir), "{uri}");
+        }
+    }
+}
+#[test]
+fn what_stays_in_the_folder_is_followed_however_it_is_written() {
+    let uri_only = |kind| {
+        matches!(
+            kind,
+            Kind::Buffer | Kind::Image | Kind::GlbBuffer | Kind::GlbImage
+        )
+    };
+    for (kind, secret) in KINDS {
+        let mut written = vec!["tex/a.EXT", "./tex/../tex/a.EXT", "tex\\a.EXT"];
+        if uri_only(kind) {
+            written.push("tex%2Fa.EXT");
+        }
+        for reference in written {
+            let u = Upload::new();
+            let name = spelled("tex/a.EXT", secret);
+            write_own_copy(&u, &name, secret);
+            let input = write_reference(&u, kind, &spelled(reference, secret));
+            u.assert_followed_and_contained(input, &format!("{kind:?} {reference}"));
+        }
+    }
+}
+#[cfg(unix)]
+#[test]
+fn a_link_that_stays_in_the_folder_is_followed() {
+    for (kind, secret) in KINDS {
+        let u = Upload::new();
+        write_own_copy(&u, &spelled("tex/a.EXT", secret), secret);
+        std::os::unix::fs::symlink(spelled("tex/a.EXT", secret), u.job().join("inner-link"))
+            .unwrap();
+        let input = write_reference(&u, kind, "inner-link");
+        u.assert_followed_and_contained(input, &format!("{kind:?}"));
+    }
+}
+#[test]
+fn what_leaves_the_folder_is_refused_however_it_is_written() {
+    for (kind, secret) in KINDS {
+        for reference in [
+            "/etc/passwd",
+            "C:\\Windows\\win.ini",
+            "C:/Windows/win.ini",
+            "C:win.ini",
+            "\\\\server\\share\\a.EXT",
+            "file:///etc/passwd",
+            "http://x/y.png",
+            "../outside/SECRET",
+            "tex/../../outside/SECRET",
+            "..\\outside\\SECRET",
+            "..",
+            "tex/../..",
+            // Comes back inside, but only by naming the folder, which would let a file learn it.
+            "../job/tex/a.EXT",
+            "..%2Foutside%2FSECRET",
+            "%2e%2e/outside/SECRET",
+            "%252e%252e/outside/SECRET",
+            "a%00b",
+            "missing.EXT",
+            "tex",
+            "tex/",
+            ".",
+        ] {
+            let u = Upload::new();
+            write_own_copy(&u, &spelled("tex/a.EXT", secret), secret);
+            let input = write_reference(&u, kind, &spelled(reference, secret));
+            u.assert_refused(input);
+        }
+    }
+}
+#[cfg(unix)]
+#[test]
+fn a_link_is_judged_by_where_it_leads() {
+    use std::os::unix::fs::symlink;
+    for (kind, secret) in KINDS {
+        let u = Upload::new();
+        write_own_copy(&u, &spelled("tex/a.EXT", secret), secret);
+        // `dir-link/../a.EXT` reads as a file in the model's folder, but the kernel goes through the
+        // link and finds the one beside `outside`.
+        let beside_outside = u.0 .0.join(spelled("a.EXT", secret));
+        fs::copy(u.0 .0.join("outside").join(secret), beside_outside).unwrap();
+        symlink(u.0 .0.join("outside"), u.job().join("dir-link")).unwrap();
+        symlink(
+            u.0 .0.join("outside").join(secret),
+            u.job().join("file-link"),
+        )
+        .unwrap();
+        symlink("/etc", u.job().join("etc-link")).unwrap();
+        symlink("loop", u.job().join("loop")).unwrap();
+        for reference in [
+            "file-link",
+            "dir-link/SECRET",
+            "dir-link/../a.EXT",
+            "etc-link/passwd",
+            "loop",
+            // The lookup by name is held to the same checks.
+            "C:\\Users\\bob\\file-link",
+            "/home/bob/file-link",
+        ] {
+            let input = write_reference(&u, kind, &spelled(reference, secret));
+            u.assert_refused(input);
+        }
+    }
+}
+#[cfg(unix)]
+#[test]
+fn a_folder_named_like_a_scheme_does_not_make_a_url_a_path() {
+    // Published as it reads, this would send whatever opens the output to fetch it.
+    for (kind, secret) in KINDS {
+        for reference in ["http://x/SECRET", "file:SECRET"] {
+            let u = Upload::new();
+            write_own_copy(&u, &format!("http:/x/{secret}"), secret);
+            write_own_copy(&u, &format!("file:{secret}"), secret);
+            let input = write_reference(&u, kind, &spelled(reference, secret));
+            u.assert_refused(input);
+        }
+    }
+}
+#[cfg(unix)]
+#[test]
+fn a_colon_in_a_file_name_is_only_part_of_its_name() {
+    for (kind, secret) in KINDS {
+        let u = Upload::new();
+        let name = spelled("x:y.EXT", secret);
+        write_own_copy(&u, &name, secret);
+        // A folder in front is what makes this a path rather than a scheme.
+        let input = write_reference(&u, kind, &format!("./{name}"));
+        u.assert_followed_and_contained(input, &format!("{kind:?}"));
+    }
+    let u = Upload::new();
+    write_own_copy(&u, "t.png", "t.png");
+    u.write("in.obj", TEXTURED_OBJ);
+    u.write("in.mtl", "newmtl m\nmap_Kd t.png\n");
+    u.write("a:b.obj", TRIANGLE);
+    for args in [
+        ["import", "in.obj", "-o", "scan:1.gltf", "--images", "copy"].as_slice(),
+        &["import", "a:b.obj"],
+    ] {
+        let out = u.run(args);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(0), "{args:?}: {stderr}");
+    }
+    assert_self_contained(&u.job().join("scan:1.gltf"));
+    assert_self_contained(&u.job().join("a:b.gltf"));
+}
 #[test]
 fn every_kind_of_reference_stays_in_the_folder() {
     for (kind, secret) in KINDS {
@@ -442,6 +694,7 @@ fn every_kind_of_reference_stays_in_the_folder() {
         u.names_a_real_path();
         let input = write_reference(&u, kind, &absolute);
         u.assert_refused(input);
+        u.assert_followed_when_trusted(input);
     }
 }
 #[test]
@@ -481,20 +734,66 @@ fn encoded_uris_are_decoded_exactly_once() {
         u.assert_refused(input);
     }
 }
+/// Each command says the same about both, apart from the reference as written.
+#[track_caller]
+fn assert_look_the_same(kind: Kind, forbidden: &str, missing: &str, prepare: impl Fn(&Upload)) {
+    let u = Upload::new();
+    prepare(&u);
+    for args in [
+        ["import", "in", "-o", "out.gltf"].as_slice(),
+        &["inspect", "in"],
+    ] {
+        let run = |reference: &str| {
+            let input = write_reference(&u, kind, reference);
+            let args: Vec<&str> = args
+                .iter()
+                .map(|a| if *a == "in" { input } else { a })
+                .collect();
+            u.stderr_of(&args)
+        };
+        let told = run(forbidden).replace(forbidden, missing);
+        assert_eq!(
+            told,
+            run(missing),
+            "{kind:?}: {forbidden} against {missing}"
+        );
+    }
+}
 #[test]
 fn a_missing_file_and_a_forbidden_one_look_the_same() {
     for (kind, secret) in KINDS {
-        let u = Upload::new();
-        let input = write_reference(&u, kind, &format!("../outside/{secret}"));
-        let forbidden = u.stderr_of(&["import", input, "-o", "out.gltf"]);
-        // Same length as `secret`, so only the reference as written differs.
-        let input = write_reference(
-            &u,
-            kind,
-            &format!("../outside/{}", secret.replace("secret", "absent")),
-        );
-        let missing = u.stderr_of(&["import", input, "-o", "out.gltf"]);
-        assert_eq!(forbidden.replace("secret", "absent"), missing, "{kind:?}");
+        let forbidden = format!("../outside/{secret}");
+        let missing = format!("../outside/{}", secret.replace("secret", "absent"));
+        assert_look_the_same(kind, &forbidden, &missing, |_| {});
+        // Whether it exists at all can't be told from what is said about its name either.
+        assert_look_the_same(kind, "/etc/passwd", "/etc/absent", |_| {});
+        // A directory is there, and isn't a file.
+        assert_look_the_same(kind, "tex", "absent", |u: &Upload| {
+            fs::create_dir(u.job().join("tex")).unwrap();
+        });
+    }
+}
+#[cfg(unix)]
+#[test]
+fn what_a_link_or_special_file_is_cant_be_told_from_a_missing_one() {
+    use std::os::unix::fs::symlink;
+    for (kind, secret) in KINDS {
+        assert_look_the_same(kind, "file-link", "absent", |u: &Upload| {
+            symlink(
+                u.0 .0.join("outside").join(secret),
+                u.job().join("file-link"),
+            )
+            .unwrap();
+        });
+        assert_look_the_same(kind, "dangling", "absent", |u: &Upload| {
+            symlink(u.0 .0.join("nothing"), u.job().join("dangling")).unwrap();
+        });
+        assert_look_the_same(kind, "fifo", "absent", |u: &Upload| {
+            let fifo = std::ffi::CString::new(u.job().join("fifo").to_str().unwrap()).unwrap();
+            // SAFETY: `fifo` is a valid C string for the duration of the call.
+            assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        });
+        assert_look_the_same(kind, "/dev/zero", "/dev/absent", |_| {});
     }
 }
 #[test]
@@ -535,6 +834,40 @@ fn symlinks_and_special_files_are_refused_and_never_hang() {
         u.assert_refused(write_reference(&u, kind, "fifo"));
     }
 }
+#[cfg(unix)]
+#[test]
+fn links_are_followed_when_trusted() {
+    use std::os::unix::fs::symlink;
+    for (kind, secret) in KINDS {
+        let u = Upload::new();
+        symlink(
+            u.0 .0.join("outside").join(secret),
+            u.job().join("file-link"),
+        )
+        .unwrap();
+        u.assert_followed_when_trusted(write_reference(&u, kind, "file-link"));
+        let u = Upload::new();
+        symlink(u.0 .0.join("outside"), u.job().join("dir-link")).unwrap();
+        let reference = format!("dir-link/{secret}");
+        u.assert_followed_when_trusted(write_reference(&u, kind, &reference));
+    }
+}
+#[test]
+fn a_trusted_reference_fails_with_the_real_reason() {
+    for (kind, _) in KINDS {
+        let u = Upload::new();
+        let input = write_reference(&u, kind, "missing.png");
+        for args in [
+            ["import", input, "-o", "out.gltf", "--trusted"].as_slice(),
+            &["inspect", input, "--trusted"],
+        ] {
+            // What the system said, rather than the refusal.
+            let stderr = u.stderr_of(args);
+            assert!(stderr.contains("os error"), "{kind:?}: {stderr}");
+            assert!(!stderr.contains("outside"), "{kind:?}: {stderr}");
+        }
+    }
+}
 #[test]
 fn inspecting_an_obj_reads_its_own_intermediate_back() {
     let u = Upload::new();
@@ -560,51 +893,80 @@ fn a_vrml_texture_is_found_when_the_workspace_is_elsewhere() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "{stderr}");
 }
+/// The three spellings an absolute reference takes, with the name it comes down to.
+const ABSOLUTE: [(&str, &str); 3] = [
+    ("C:\\Users\\bob\\tex.EXT", "tex.EXT"),
+    ("/home/bob/tex.EXT", "tex.EXT"),
+    ("/etc/passwd", "passwd"),
+];
 #[test]
-fn an_absolute_path_from_an_old_exporter_finds_the_file_beside_the_model() {
+fn an_absolute_path_opens_the_file_of_that_name_beside_the_model() {
     for (kind, secret) in KINDS {
-        for written in [
-            format!("C:\\Users\\bob\\{secret}"),
-            format!("/home/bob/{secret}"),
-        ] {
+        for (written, name) in ABSOLUTE {
             let u = Upload::new();
-            let name = u.job().join(secret);
-            fs::copy(u.0 .0.join("outside").join(secret), &name).unwrap();
-            let input = write_reference(&u, kind, &written);
-            for args in [
-                ["import", input, "-o", "out.gltf"].as_slice(),
-                &["inspect", input],
-            ] {
-                let out = u.run(args);
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                assert!(out.status.success(), "{kind:?} {written}: {stderr}");
-            }
+            write_own_copy(&u, &spelled(name, secret), secret);
+            let input = write_reference(&u, kind, &spelled(written, secret));
+            let case = format!("{kind:?} {written}");
+            u.assert_followed_and_contained(input, &case);
+        }
+    }
+}
+#[test]
+fn an_absolute_path_without_that_name_beside_the_model_is_refused() {
+    for (kind, secret) in KINDS {
+        for (written, _) in ABSOLUTE {
+            let u = Upload::new();
+            // Under a folder of its name, and elsewhere: neither is beside the model.
+            write_own_copy(&u, &spelled("tex/tex.EXT", secret), secret);
+            write_own_copy(&u, &spelled("tex/passwd", secret), secret);
+            let input = write_reference(&u, kind, &spelled(written, secret));
+            u.assert_refused(input);
         }
     }
 }
 #[test]
 fn a_real_absolute_path_only_ever_opens_the_copy_in_the_folder() {
+    for (kind, secret) in KINDS {
+        let u = Upload::new();
+        let outside = fs::canonicalize(u.0 .0.join("outside").join(secret)).unwrap();
+        write_own_copy(&u, secret, secret);
+        let written = outside.to_str().unwrap().replace('\\', "/");
+        u.names_a_real_path();
+        let input = write_reference(&u, kind, &written);
+        u.assert_followed_and_contained(input, &format!("{kind:?}"));
+        for output in ["auto.bin", "keep.bin", "copy.bin"] {
+            let bytes = fs::read(u.job().join(output)).unwrap();
+            assert!(
+                !bytes.windows(CANARY.len()).any(|w| w == CANARY),
+                "{kind:?}"
+            );
+        }
+    }
+}
+#[test]
+fn a_name_is_looked_for_beside_the_file_that_wrote_it() {
+    let model = TEXTURED_OBJ.replace("in.mtl", "sub/in.mtl");
+    // The library is in a subfolder, and the texture is beside the model.
     let u = Upload::new();
-    let outside = fs::canonicalize(u.0 .0.join("outside/secret.png")).unwrap();
-    image::RgbImage::new(8, 8)
-        .save(u.job().join("secret.png"))
-        .unwrap();
-    let written = outside.to_str().unwrap().replace('\\', "/");
-    u.names_a_real_path();
-    let input = write_reference(&u, Kind::MapKd, &written);
-    let out = u.run(&["inspect", input, "--json"]);
-    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
-    // The outside copy is 4 by 4.
-    assert_eq!(report["textures"][0]["width"], 8, "{report}");
+    fs::create_dir(u.job().join("sub")).unwrap();
+    write_own_copy(&u, "t.png", "t.png");
+    u.write("in.obj", &model);
+    u.write("sub/in.mtl", "newmtl m\nmap_Kd C:\\Users\\bob\\t.png\n");
+    u.assert_refused("in.obj");
+    // Beside the library.
+    let u = Upload::new();
+    write_own_copy(&u, "sub/t.png", "t.png");
+    u.write("in.obj", &model);
+    u.write("sub/in.mtl", "newmtl m\nmap_Kd C:\\Users\\bob\\t.png\n");
+    u.assert_followed_and_contained("in.obj", "beside the library");
 }
 #[test]
 fn a_relative_path_is_not_looked_for_by_name() {
     for (kind, secret) in KINDS {
         let u = Upload::new();
-        fs::copy(u.0 .0.join("outside").join(secret), u.job().join(secret)).unwrap();
+        write_own_copy(&u, secret, secret);
         let input = write_reference(&u, kind, &format!("sub/dir/{secret}"));
-        let stderr = u.stderr_of(&["import", input, "-o", "out.gltf"]);
-        assert!(stderr.contains(REFUSED), "{kind:?}: {stderr}");
+        u.assert_refused(input);
     }
 }
 #[test]
@@ -879,6 +1241,20 @@ fn an_output_name_is_cleaned_too() {
     let out = u.run(&["import", "m.obj", "-o", &output]);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains(&format!("Wrote {CLEANED}")), "{stderr}");
+}
+#[test]
+fn an_ordinary_name_reads_as_written_in_messages_and_the_report() {
+    let u = Upload::new();
+    let name = "l'église [v2]+#1.obj";
+    u.write(name, "v 0 0 oops\n");
+    let stderr = u.stderr_of(&["import", name, "-o", "out.gltf"]);
+    assert!(stderr.contains(&format!("Error: {name}:1: ")), "{stderr}");
+    uv_buffer(&u);
+    write_own_copy(&u, "mur d'enceinte #1.png", "t.png");
+    u.write("m.gltf", &gltf_with_image("mur%20d'enceinte%20%231.png"));
+    let out = u.run(&["inspect", "m.gltf"]);
+    let report = String::from_utf8_lossy(&out.stdout);
+    assert!(report.contains("mur d'enceinte #1.png"), "{report}");
 }
 #[test]
 fn a_name_from_the_file_is_cleaned_and_cut() {
