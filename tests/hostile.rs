@@ -3,6 +3,7 @@ use serde_json::{json, Value};
 #[cfg(unix)]
 use std::os::unix::{fs::PermissionsExt, process::ExitStatusExt};
 use std::{
+    cell::Cell,
     fs,
     path::PathBuf,
     process::{Command, Output, Stdio},
@@ -106,6 +107,7 @@ fn write_view_bomb(f: &Fixture) {
 #[cfg(unix)]
 fn assert_stopped_by_file_size_limit(f: &Fixture, out: &Output, inputs: &[&str]) {
     let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_harmless(&stderr);
     assert_eq!(out.status.signal(), None, "{stderr}");
     assert_eq!(out.status.code(), Some(3), "{stderr}");
     assert!(stderr.contains("File too large"), "{stderr}");
@@ -176,8 +178,9 @@ fn a_directory_the_process_cannot_write_is_the_environment() {
     assert_eq!(out.status.code(), Some(4), "{stderr}");
 }
 
-/// A model in `job`, and in `outside` the files a hostile one would like to reach.
-struct Upload(Fixture);
+/// A model in `job`, and in `outside` the files a hostile one would like to reach. The flag says
+/// a file in the model names a real path of this machine, which a message may then repeat.
+struct Upload(Fixture, Cell<bool>);
 const CANARY: &[u8] = b"objtools-canary";
 const REFUSED: &str = "not found, or outside the model's folder";
 impl Upload {
@@ -191,7 +194,10 @@ impl Upload {
         image::RgbImage::new(4, 4)
             .save(outside.join("secret.png"))
             .unwrap();
-        Self(f)
+        Self(f, Cell::new(false))
+    }
+    fn names_a_real_path(&self) {
+        self.1.set(true);
     }
     fn job(&self) -> PathBuf {
         self.0 .0.join("job")
@@ -199,7 +205,9 @@ impl Upload {
     fn write(&self, name: &str, body: &str) {
         fs::write(self.job().join(name), body).unwrap();
     }
-    /// Never waits for more than a minute, since what's being tested may be a hang.
+    /// Never waits for more than a minute, since what's being tested may be a hang. Whatever the
+    /// test goes on to check, every run has to hold to `assert_nothing_escaped`.
+    #[track_caller]
     fn run(&self, args: &[&str]) -> Output {
         let mut child = Command::new(env!("CARGO_BIN_EXE_objtools"))
             .args(args)
@@ -217,7 +225,61 @@ impl Upload {
             }
             thread::sleep(Duration::from_millis(5));
         }
-        child.wait_with_output().unwrap()
+        let out = child.wait_with_output().unwrap();
+        self.assert_nothing_escaped(args, &out);
+        out
+    }
+    /// What no file may cause, whether it is accepted or rejected.
+    #[track_caller]
+    fn assert_nothing_escaped(&self, args: &[&str], out: &Output) {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        // Not a panic, and not killed by a signal.
+        assert!(
+            matches!(out.status.code(), Some(0 | 1 | 3 | 4)),
+            "{args:?}: {:?}: {stderr}",
+            out.status
+        );
+        assert_harmless(&stderr);
+        assert!(
+            stderr.lines().count() <= 20 && stderr.len() < 4_000,
+            "{args:?}: {} bytes: {stderr}",
+            stderr.len()
+        );
+        // The report goes where a person reads it too. JSON escapes what it has to on its own.
+        if args.first() == Some(&"inspect") && !args.contains(&"--json") {
+            assert_harmless(&String::from_utf8_lossy(&out.stdout));
+        }
+        for internal in ["objtools-", " Os {"] {
+            assert!(!stderr.contains(internal), "{args:?}: {stderr}");
+        }
+        if !self.1.get() {
+            let temp = std::env::temp_dir();
+            let canonical = fs::canonicalize(&temp).unwrap_or_else(|_| temp.clone());
+            for path in [temp, canonical] {
+                let path = path.to_string_lossy();
+                assert!(
+                    !stderr.contains(path.trim_end_matches('/')),
+                    "{args:?}: {stderr}"
+                );
+            }
+            assert!(!stderr.contains("hostile-"), "{args:?}: {stderr}");
+        }
+        let names = |dir: PathBuf| -> Vec<String> {
+            let entries = fs::read_dir(dir).unwrap();
+            let names = entries.map(|e| e.unwrap().file_name().to_string_lossy().into_owned());
+            let mut names: Vec<String> = names.collect();
+            names.sort();
+            names
+        };
+        let outside = names(self.0 .0.join("outside"));
+        assert_eq!(
+            outside,
+            ["secret.bin", "secret.mtl", "secret.png"],
+            "{args:?}"
+        );
+        for name in names(self.job()).iter().chain(&names(self.0 .0.clone())) {
+            assert!(!name.starts_with("objtools-"), "{args:?}: {name}");
+        }
     }
     fn stderr_of(&self, args: &[&str]) -> String {
         let out = self.run(args);
@@ -236,10 +298,7 @@ impl Upload {
         for entry in fs::read_dir(self.job()).unwrap() {
             let path = entry.unwrap().path();
             let name = path.file_name().unwrap().to_string_lossy().into_owned();
-            assert!(
-                !name.starts_with("objtools-") && !name.starts_with("out"),
-                "{name}"
-            );
+            assert!(!name.starts_with("out"), "{name}");
             // Links are skipped because an allowed read wouldn't follow them, and a FIFO would hang.
             if !fs::symlink_metadata(&path).unwrap().is_file() {
                 continue;
@@ -380,6 +439,7 @@ fn every_kind_of_reference_stays_in_the_folder() {
         let absolute = fs::canonicalize(u.0 .0.join("outside").join(secret)).unwrap();
         // Forward slashes, as a file would have them: a URI can't contain a raw backslash.
         let absolute = absolute.to_str().unwrap().replace('\\', "/");
+        u.names_a_real_path();
         let input = write_reference(&u, kind, &absolute);
         u.assert_refused(input);
     }
@@ -530,6 +590,7 @@ fn a_real_absolute_path_only_ever_opens_the_copy_in_the_folder() {
         .save(u.job().join("secret.png"))
         .unwrap();
     let written = outside.to_str().unwrap().replace('\\', "/");
+    u.names_a_real_path();
     let input = write_reference(&u, Kind::MapKd, &written);
     let out = u.run(&["inspect", input, "--json"]);
     let report: Value = serde_json::from_slice(&out.stdout).unwrap();
@@ -613,31 +674,211 @@ fn keeping_images_never_writes_a_reference_outside_the_output_folder() {
     }
 }
 
-const HOSTILE: &str = "\x1b[31m<img\x07";
-/// Nothing that could drive a terminal or read as markup, wherever it came from.
+const HOSTILE: &str = "\x1b[31m<img\x07\u{202e}\u{200b}";
+/// `HOSTILE` as a message may show it.
+const CLEANED: &str = "?[31m?img";
+/// Nothing that could drive a terminal or read as markup, wherever it came from. That includes
+/// the characters that reorder text or hide it without showing anything.
 #[track_caller]
 fn assert_harmless(stderr: &str) {
-    let hostile = |c: char| (c.is_control() && c != '\n') || matches!(c, '<' | '>' | '&');
+    let hostile = |c: char| {
+        (c.is_control() && c != '\n')
+            || matches!(c, '<' | '>' | '&')
+            || matches!(c, '\u{ad}' | '\u{200b}'..='\u{200f}' | '\u{2028}'..='\u{202e}')
+            || matches!(c, '\u{2060}'..='\u{206f}' | '\u{feff}')
+    };
     assert!(!stderr.contains(hostile), "{stderr:?}");
 }
-#[test]
-fn text_from_the_file_cannot_drive_a_terminal() {
-    let u = Upload::new();
-    u.write(
-        "m.obj",
-        &format!("{HOSTILE} 1\nusemtl {HOSTILE}\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n"),
-    );
-    let out = u.run(&["import", "m.obj", "-o", "out.gltf"]);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(out.status.code(), Some(0), "{stderr}");
-    assert!(stderr.contains("undefined materials"), "{stderr}");
-    assert_harmless(&stderr);
+const TRIANGLE: &str = "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
+type Files = Vec<(String, Vec<u8>)>;
+fn file(name: &str, body: impl Into<Vec<u8>>) -> (String, Vec<u8>) {
+    (name.to_owned(), body.into())
+}
+/// `HOSTILE` at each place a parser takes text from. The flag says the import's messages have to
+/// show it, so that the check is known to reach the message and not a silent success.
+fn hostile_text() -> Vec<(&'static str, Files, bool)> {
+    let h = HOSTILE;
+    let obj = |body: String| ("m.obj", vec![file("m.obj", body)], true);
+    let mtl = |body: String, shown: bool| {
+        let obj = format!("mtllib m.mtl\n{TRIANGLE}");
+        let files = vec![file("m.obj", obj), file("m.mtl", body)];
+        ("m.obj", files, shown)
+    };
+    let wrl = |body: String, shown: bool| ("m.wrl", vec![file("m.wrl", body)], shown);
+    let gltf = |root: Value, shown: bool| {
+        let files = vec![file("m.gltf", root.to_string()), file("m.bin", positions())];
+        ("m.gltf", files, shown)
+    };
+    let triangle = || -> Value { serde_json::from_str(&gltf_with_buffer("m.bin")).unwrap() };
+    let with = |edit: &dyn Fn(&mut Value)| {
+        let mut root = triangle();
+        edit(&mut root);
+        root
+    };
+    let invisible = with(&|root| {
+        root["materials"] = json!([{
+            "name": h, "alphaMode": "BLEND",
+            "pbrMetallicRoughness": {"baseColorFactor": [1, 1, 1, 0]},
+        }]);
+        root["meshes"][0]["primitives"][0]["material"] = json!(0);
+    });
+    let attribute = with(&|root| {
+        root["accessors"].as_array_mut().unwrap().push(json!({
+            "bufferView": 0, "componentType": 5126, "count": 2, "type": "VEC3",
+        }));
+        root["meshes"][0]["primitives"][0]["attributes"][h] = json!(1);
+    });
+    let corrupt_png = [b"\x89PNG\r\n\x1a\n", h.as_bytes()].concat();
+    let mut corrupt_image: Value = serde_json::from_str(&gltf_with_image("t.png")).unwrap();
+    corrupt_image["images"][0]["mimeType"] = json!(h);
+    let mut cases = vec![
+        obj(format!("v 1{h} 0 0\n")),
+        obj(format!("{h} 1\n{TRIANGLE}")),
+        obj(format!("usemtl {h}\n{TRIANGLE}")),
+        obj(format!("mtllib {h}.mtl\n")),
+        obj(format!("usemtl {}\n{TRIANGLE}", h.repeat(5_000))),
+        (
+            "m.obj",
+            vec![file("m.obj", format!("v {}\n", h.repeat(200_000)))],
+            false,
+        ),
+        (
+            "m.obj",
+            vec![file("m.obj", &b"usemtl \xff\xfe\x1b[31m\nv 0 0 \xff\n"[..])],
+            false,
+        ),
+        mtl(format!("newmtl m\nKd {h}\n"), false),
+        mtl(format!("newmtl m\nmap_Kd {h}.png\n"), true),
+        mtl(format!("newmtl m\nmap_Kd -{h} 1 t.png\n"), true),
+        mtl(format!("newmtl m\n{h} 1\n"), true),
+        (
+            "m.obj",
+            vec![
+                file("m.obj", format!("mtllib m.mtl\nusemtl {h}\n{TRIANGLE}")),
+                file("m.mtl", format!("newmtl {h}\nd 0\n")),
+            ],
+            true,
+        ),
+        (
+            "m.obj",
+            vec![
+                file("m.obj", format!("mtllib m.mtl\n{TRIANGLE}")),
+                file("m.mtl", &b"newmtl \xff\x1b\nmap_Kd \xff\x1b.png\n"[..]),
+            ],
+            false,
+        ),
+        wrl(format!("#VRML V2.0 utf8\n{h} {{ }}\n"), false),
+        wrl(format!("{h} {{ }}\n"), false),
+        wrl(vrml_with_url(h), true),
+        wrl(
+            vrml_with_url("t.png").replace("coordIndex [0 1 2 -1]", &format!("coordIndex [{h}]")),
+            false,
+        ),
+        (
+            "m.wrl",
+            vec![file("m.wrl", &b"#VRML V2.0 utf8\n\xff\x1b[31m { }\n"[..])],
+            false,
+        ),
+        (
+            "m.gltf",
+            vec![file("m.gltf", format!("{{\"asset\": {h}"))],
+            false,
+        ),
+        gltf(with(&|root| root["extensionsRequired"] = json!([h])), true),
+        gltf(with(&|root| root["extensionsUsed"] = json!([h])), true),
+        gltf(invisible, true),
+        gltf(attribute, true),
+        gltf(with(&|root| root["buffers"][0]["uri"] = json!(h)), false),
+        gltf(serde_json::from_str(&gltf_with_image(h)).unwrap(), false),
+        gltf(
+            serde_json::from_str(&gltf_with_image(&format!("data:image/png;base64,{h}"))).unwrap(),
+            false,
+        ),
+        (
+            "m.gltf",
+            vec![
+                file("m.gltf", corrupt_image.to_string()),
+                file("m.bin", [positions(), vec![0; 24]].concat()),
+                file("t.png", corrupt_png),
+            ],
+            false,
+        ),
+        (
+            "m.glb",
+            vec![file("m.glb", [b"glTF\x02\0\0\0", h.as_bytes()].concat())],
+            false,
+        ),
+    ];
+    // Windows doesn't allow these names.
+    if cfg!(unix) {
+        let name: &'static str = format!("{h}.obj").leak();
+        cases.push((name, vec![file(name, "v 0 0 oops\n")], true));
+        let texture = format!("{h}.png");
+        cases.push((
+            "m.obj",
+            vec![
+                file("m.obj", TEXTURED_OBJ.replace("in.mtl", "m.mtl")),
+                file("m.mtl", format!("newmtl m\nmap_Kd {texture}\n")),
+                file(&texture, "not an image"),
+            ],
+            true,
+        ));
+    }
+    cases
 }
 #[test]
-fn a_rejected_file_cannot_drive_a_terminal_through_its_error() {
+fn no_parser_lets_text_from_the_file_reach_a_message_as_it_is() {
+    for (input, files, shown) in hostile_text() {
+        let u = Upload::new();
+        for (name, body) in &files {
+            fs::write(u.job().join(name), body).unwrap();
+        }
+        let out = u.run(&["import", input, "-o", "relative.gltf"]);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(
+            stderr.contains(CLEANED),
+            shown,
+            "{input}: {files:?}: {stderr}"
+        );
+        u.run(&["inspect", input]);
+        u.run(&["inspect", input, "--json"]);
+        // Given as absolute paths, which is what a message would show if it printed one.
+        let job = fs::canonicalize(u.job()).unwrap();
+        let (input, output) = (job.join(input), job.join("absolute.gltf"));
+        let (input, output) = (input.to_str().unwrap(), output.to_str().unwrap());
+        u.run(&["import", input, "-o", output]);
+        u.run(&["inspect", input]);
+    }
+}
+#[test]
+fn arguments_are_cleaned_too() {
     let u = Upload::new();
-    u.write("m.obj", &format!("v 1{HOSTILE} 0 0\n"));
-    assert_harmless(&u.stderr_of(&["import", "m.obj", "-o", "out.gltf"]));
+    u.write("m.obj", TRIANGLE);
+    let option = format!("--{HOSTILE}");
+    for args in [
+        [HOSTILE].as_slice(),
+        &["import", &option],
+        &["inspect", &option],
+        &["import", "m.obj", "-o", "out.gltf", &option],
+    ] {
+        let stderr = u.stderr_of(args);
+        assert!(stderr.contains(CLEANED), "{args:?}: {stderr}");
+    }
+    let extension = format!("m.{HOSTILE}");
+    for command in ["import", "inspect"] {
+        let stderr = u.stderr_of(&[command, &extension]);
+        assert!(stderr.contains(CLEANED), "{stderr}");
+    }
+}
+#[cfg(unix)]
+#[test]
+fn an_output_name_is_cleaned_too() {
+    let u = Upload::new();
+    u.write("m.obj", TRIANGLE);
+    let output = format!("{HOSTILE}.gltf");
+    let out = u.run(&["import", "m.obj", "-o", &output]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains(&format!("Wrote {CLEANED}")), "{stderr}");
 }
 #[test]
 fn a_name_from_the_file_is_cleaned_and_cut() {
@@ -672,18 +913,30 @@ fn the_report_of_inspect_cleans_texture_names_but_its_json_keeps_them() {
     let json: Value = serde_json::from_slice(&json.stdout).unwrap();
     assert_eq!(json["textures"][0]["name"], name);
 }
-/// Run with absolute paths, which are what would show if a message printed them.
-#[track_caller]
-fn assert_no_machine_path(u: &Upload, args: &[&str]) {
-    let job = u.job();
-    let job = fs::canonicalize(&job).unwrap_or(job);
-    let out = u.run(args);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    let parent = job.parent().unwrap().to_string_lossy();
-    assert!(!stderr.contains(&*parent), "{args:?}: {stderr}");
-    assert!(!stderr.contains("objtools-"), "{args:?}: {stderr}");
-    assert!(!stderr.contains(" Os {"), "{args:?}: {stderr}");
+#[test]
+fn the_report_of_inspect_cleans_the_name_an_embedded_image_gives_itself() {
+    let u = Upload::new();
+    uv_buffer(&u);
+    image::RgbImage::new(4, 4)
+        .save(u.job().join("t.png"))
+        .unwrap();
+    let png = fs::read(u.job().join("t.png")).unwrap();
+    let mut root: Value = serde_json::from_str(&gltf_with_image("t.png")).unwrap();
+    root["bufferViews"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"buffer": 1, "byteLength": png.len()}));
+    root["buffers"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"uri": "t.png", "byteLength": png.len()}));
+    root["images"] = json!([{"bufferView": 2, "mimeType": "image/png", "name": HOSTILE}]);
+    u.write("m.gltf", &root.to_string());
+    let out = u.run(&["inspect", "m.gltf"]);
+    let report = String::from_utf8_lossy(&out.stdout);
+    assert!(report.contains(CLEANED), "{report}");
 }
+/// Run with absolute paths, which are what would show if a message printed them.
 #[test]
 fn no_message_shows_where_the_job_runs() {
     for (kind, _) in KINDS {
@@ -692,8 +945,8 @@ fn no_message_shows_where_the_job_runs() {
         let job = fs::canonicalize(u.job()).unwrap();
         let (input, output) = (job.join(input), job.join("out.gltf"));
         let (input, output) = (input.to_str().unwrap(), output.to_str().unwrap());
-        assert_no_machine_path(&u, &["import", input, "-o", output]);
-        assert_no_machine_path(&u, &["inspect", input]);
+        u.run(&["import", input, "-o", output]);
+        u.run(&["inspect", input]);
     }
 }
 #[test]
