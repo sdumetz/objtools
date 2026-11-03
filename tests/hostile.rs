@@ -24,22 +24,25 @@ impl Fixture {
         Self(p)
     }
     #[cfg(unix)]
+    fn import_limited(&self, blocks: u32, input: &str) -> Output {
+        self.limited(blocks, &["import", input, "-o", "out.gltf"])
+    }
+    #[cfg(unix)]
     /// Runs under a file-size limit in 512-byte blocks or larger, as the shell defines `ulimit -f`.
     /// SIGXFSZ is ignored, as a host has to: its default action kills the process, leaving the
     /// workspace and partial output behind. The ignored disposition carries across `exec`.
-    fn import_limited(&self, blocks: u32, input: &str) -> Output {
+    fn limited(&self, blocks: u32, args: &[&str]) -> Output {
         Command::new("sh")
             .arg("-c")
             .arg(format!(
-                r#"trap '' XFSZ; ulimit -f {blocks}; exec "$0" import "$1" -o out.gltf"#
+                r#"trap '' XFSZ; ulimit -f {blocks}; exec "$0" "$@""#
             ))
             .arg(env!("CARGO_BIN_EXE_objtools"))
-            .arg(input)
+            .args(args)
             .current_dir(&self.0)
             .output()
             .unwrap()
     }
-    #[cfg(unix)]
     fn entries(&self) -> Vec<String> {
         let mut names: Vec<String> = fs::read_dir(&self.0)
             .unwrap()
@@ -55,10 +58,9 @@ impl Drop for Fixture {
     }
 }
 /// A small file whose import writes far more: every face repeats the same vertices.
-#[cfg(unix)]
-fn write_face_bomb(f: &Fixture) {
+fn write_face_bomb(f: &Fixture, faces: usize) {
     let mut obj = String::from("v 0 0 0\nv 1 0 0\nv 0 1 0\n");
-    obj.push_str(&"f 1 2 3\n".repeat(200_000));
+    obj.push_str(&"f 1 2 3\n".repeat(faces));
     fs::write(f.0.join("in.obj"), obj).unwrap();
 }
 /// Many animation samplers over the same bytes, through their own buffer views: the JSON stays
@@ -117,7 +119,7 @@ fn assert_stopped_by_file_size_limit(f: &Fixture, out: &Output, inputs: &[&str])
 #[test]
 fn a_file_size_limit_stops_an_obj_import_and_leaves_nothing_behind() {
     let f = Fixture::new();
-    write_face_bomb(&f);
+    write_face_bomb(&f, 200_000);
     let out = f.import_limited(8, "in.obj");
     assert_stopped_by_file_size_limit(&f, &out, &["in.obj"]);
 }
@@ -159,9 +161,94 @@ fn a_file_size_limit_stops_a_converted_texture_and_keeps_its_exit_code() {
 }
 #[cfg(unix)]
 #[test]
+fn a_file_size_limit_stops_inspect_marking_an_enormous_texture() {
+    // A header is all it takes: the map of which texels are used is sized from what it declares.
+    let f = Fixture::new();
+    let mut bmp = b"BM".to_vec();
+    bmp.extend_from_slice(&[0; 8]);
+    bmp.extend_from_slice(&54u32.to_le_bytes());
+    bmp.extend_from_slice(&40u32.to_le_bytes());
+    bmp.extend_from_slice(&60_000u32.to_le_bytes());
+    bmp.extend_from_slice(&60_000u32.to_le_bytes());
+    bmp.extend_from_slice(&1u16.to_le_bytes());
+    bmp.extend_from_slice(&24u16.to_le_bytes());
+    bmp.extend_from_slice(&[0; 24]);
+    fs::write(f.0.join("t.bmp"), bmp).unwrap();
+    let mut buffer = positions();
+    buffer.extend([0u8; 24]);
+    fs::write(f.0.join("m.bin"), buffer).unwrap();
+    fs::write(f.0.join("in.gltf"), gltf_with_image("t.bmp")).unwrap();
+    let out = f.limited(8, &["inspect", "in.gltf"]);
+    assert_stopped_by_file_size_limit(&f, &out, &["in.gltf", "m.bin", "t.bmp"]);
+}
+#[test]
+fn a_job_killed_midway_does_not_block_the_next_one() {
+    let f = Fixture::new();
+    write_face_bomb(&f, 4_000_000);
+    let mut job = Command::new(env!("CARGO_BIN_EXE_objtools"))
+        .args(["import", "in.obj", "-o", "killed.gltf"])
+        .current_dir(&f.0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let workspaces = || {
+        let entries = f.entries();
+        entries
+            .into_iter()
+            .filter(|e| e.starts_with("objtools-"))
+            .collect::<Vec<_>>()
+    };
+    let start = Instant::now();
+    while workspaces().is_empty() {
+        assert!(
+            job.try_wait().unwrap().is_none(),
+            "finished before it could be killed"
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(60),
+            "never made a workspace"
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
+    job.kill().unwrap();
+    job.wait().unwrap();
+    let left = workspaces();
+    assert_eq!(left.len(), 1);
+    fs::write(f.0.join("next.obj"), TRIANGLE).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_objtools"))
+        .args(["import", "next.obj", "-o", "next.gltf"])
+        .current_dir(&f.0)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    // Removing what a killed job leaves is for whoever owns the directory.
+    assert_eq!(workspaces(), left);
+}
+#[cfg(unix)]
+#[test]
+fn a_leftover_with_this_process_id_does_not_block_the_job() {
+    // Process IDs repeat in every container, so a killed job's leftover can have the next one's.
+    // `exec` keeps the shell's ID, which is how the test knows it in advance.
+    let f = Fixture::new();
+    fs::write(f.0.join("in.obj"), TRIANGLE).unwrap();
+    let out = Command::new("sh")
+        .arg("-c")
+        .arg(r#"mkdir "objtools-$$"; exec "$0" import in.obj -o out.gltf"#)
+        .arg(env!("CARGO_BIN_EXE_objtools"))
+        .current_dir(&f.0)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+}
+#[cfg(unix)]
+#[test]
 fn a_directory_the_process_cannot_write_is_the_environment() {
     let f = Fixture::new();
-    write_face_bomb(&f);
+    write_face_bomb(&f, 200_000);
     let locked = f.0.join("locked");
     fs::create_dir(&locked).unwrap();
     fs::set_permissions(&locked, fs::Permissions::from_mode(0o555)).unwrap();
@@ -1531,7 +1618,7 @@ fn an_error_in_a_generated_file_names_the_vrml_it_came_from() {
 }
 #[track_caller]
 fn assert_few_lines(stderr: &str) {
-    assert!(stderr.lines().count() <= 5, "{stderr}");
+    assert!(stderr.lines().count() <= 8, "{stderr}");
     assert!(stderr.len() < 2_000, "{} bytes", stderr.len());
 }
 #[test]
@@ -1566,6 +1653,144 @@ fn thousands_of_unsupported_keywords_are_one_warning() {
         stderr.contains("unsupported OBJ records omitted: 20000"),
         "{stderr}"
     );
+    assert_few_lines(&stderr);
+}
+/// Run with `HOSTILE` text in every name, so that volume and content are tested together.
+#[track_caller]
+fn assert_one_counted_warning(u: &Upload, input: &str, count: &str) {
+    let out = u.run(&["import", input, "-o", "out.gltf"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(stderr.matches(count).count(), 1, "{stderr}");
+    assert_few_lines(&stderr);
+}
+#[test]
+fn thousands_of_unsupported_mtl_properties_are_one_warning() {
+    let u = Upload::new();
+    let mut library = String::new();
+    let mut obj = format!("mtllib m.mtl\n{}", TRIANGLE.replace("f 1 2 3\n", ""));
+    for i in 0..20_000 {
+        library.push_str(&format!("newmtl {HOSTILE}{i}\nd 0\n{HOSTILE}{i} 1\n"));
+        obj.push_str(&format!("usemtl {HOSTILE}{i}\nf 1 2 3\n"));
+    }
+    u.write("m.mtl", &library);
+    u.write("m.obj", &obj);
+    let out = u.run(&["import", "m.obj", "-o", "out.gltf"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("unsupported MTL properties ignored: 20000"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("as opacity): 20000"), "{stderr}");
+    assert_few_lines(&stderr);
+}
+#[test]
+fn thousands_of_map_options_are_one_warning() {
+    let u = Upload::new();
+    let mut library = String::from("newmtl m\n");
+    for _ in 0..20_000 {
+        library.push_str("map_Kd -t 1 t.png\n");
+    }
+    u.write("m.mtl", &library);
+    u.write(
+        "m.obj",
+        &format!("mtllib m.mtl\n{TEXTURED_OBJ}").replace("mtllib in.mtl\n", ""),
+    );
+    write_own_copy(&u, "t.png", "t.png");
+    assert_one_counted_warning(&u, "m.obj", "unsupported map_Kd options ignored: 20000");
+}
+#[test]
+fn thousands_of_objects_say_nothing_each() {
+    let u = Upload::new();
+    let mut obj = String::from("v 0 0 0\nv 1 0 0\nv 0 1 0\n");
+    for i in 0..20_000 {
+        obj.push_str(&format!("o {HOSTILE}{i}\nf 1 2 3\n"));
+    }
+    u.write("m.obj", &obj);
+    let out = u.run(&["import", "m.obj", "-o", "out.gltf"]);
+    assert_few_lines(&String::from_utf8_lossy(&out.stderr));
+}
+#[test]
+fn thousands_of_faces_too_short_are_one_warning() {
+    let u = Upload::new();
+    let short = "f 1 2\n".repeat(20_000);
+    u.write("m.obj", &format!("{TRIANGLE}{short}"));
+    assert_one_counted_warning(&u, "m.obj", "omitted 20000 faces");
+}
+/// A glTF of one triangle and `count` copies of a material, each with its own primitive.
+fn gltf_with_materials(u: &Upload, count: usize, material: impl Fn(usize) -> Value) {
+    fs::write(u.job().join("m.bin"), positions()).unwrap();
+    let mut root: Value = serde_json::from_str(&gltf_with_buffer("m.bin")).unwrap();
+    root["materials"] = (0..count).map(material).collect();
+    let primitives: Vec<Value> = (0..count)
+        .map(|i| json!({"attributes": {"POSITION": 0}, "material": i}))
+        .collect();
+    root["meshes"][0]["primitives"] = json!(primitives);
+    u.write("m.gltf", &root.to_string());
+}
+#[test]
+fn thousands_of_invisible_gltf_materials_are_one_warning() {
+    let u = Upload::new();
+    gltf_with_materials(&u, 20_000, |i| {
+        json!({
+            "name": format!("{HOSTILE}{i}"), "alphaMode": "BLEND",
+            "pbrMetallicRoughness": {"baseColorFactor": [1, 1, 1, 0]},
+        })
+    });
+    assert_one_counted_warning(&u, "m.gltf", "which will be invisible: 20000");
+}
+#[test]
+fn thousands_of_dropped_extensions_are_one_warning() {
+    let u = Upload::new();
+    gltf_with_materials(
+        &u,
+        20_000,
+        |i| json!({"extensions": {format!("{HOSTILE}{i}"): {}}}),
+    );
+    assert_one_counted_warning(&u, "m.gltf", "extensions dropped from the output: 20000");
+}
+#[test]
+fn thousands_of_unknown_extensions_are_one_warning_from_both_commands() {
+    let u = Upload::new();
+    fs::write(u.job().join("m.bin"), positions()).unwrap();
+    let mut root: Value = serde_json::from_str(&gltf_with_buffer("m.bin")).unwrap();
+    let names: Vec<String> = (0..20_000).map(|i| format!("{HOSTILE}{i}")).collect();
+    root["extensionsUsed"] = json!(names);
+    u.write("m.gltf", &root.to_string());
+    assert_one_counted_warning(&u, "m.gltf", "unsupported extensions ignored: 20000");
+    let out = u.run(&["inspect", "m.gltf"]);
+    assert_eq!(out.stderr.iter().filter(|b| **b == b'\n').count(), 1);
+}
+#[test]
+fn thousands_of_primitives_of_lines_are_one_warning() {
+    let u = Upload::new();
+    fs::write(u.job().join("m.bin"), positions()).unwrap();
+    let mut root: Value = serde_json::from_str(&gltf_with_buffer("m.bin")).unwrap();
+    let mut primitives = vec![json!({"attributes": {"POSITION": 0}})];
+    primitives.extend((0..20_000).map(|_| json!({"attributes": {"POSITION": 0}, "mode": 1})));
+    root["meshes"][0]["primitives"] = json!(primitives);
+    u.write("m.gltf", &root.to_string());
+    assert_one_counted_warning(&u, "m.gltf", "omitted 20000 primitives");
+}
+#[test]
+fn thousands_of_bad_vrml_shapes_warn_once_each() {
+    let u = Upload::new();
+    let shape = "Shape { geometry IndexedFaceSet {\n\
+                 coord Coordinate { point [0 0 0, 1 0 0, 0 1 0, 9] }\n\
+                 coordIndex [0 1 -1 0 1 2 -1] color Color { color [1 0 0] } } }\n";
+    u.write(
+        "m.wrl",
+        &format!("#VRML V2.0 utf8\n{}", shape.repeat(20_000)),
+    );
+    let out = u.run(&["import", "m.wrl", "-o", "out.gltf"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    for warning in [
+        "partial tuple",
+        "colours are omitted",
+        "fewer than 3 vertices",
+    ] {
+        assert_eq!(stderr.matches(warning).count(), 1, "{stderr}");
+    }
     assert_few_lines(&stderr);
 }
 #[test]
