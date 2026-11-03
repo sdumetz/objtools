@@ -12,6 +12,7 @@ pub fn run(args: impl Iterator<Item = String>) -> Res<()> {
     let mut progress = false;
     let mut keep_tmp = false;
     let mut no_color = false;
+    let mut trusted = false;
     let mut images = images::Options::default();
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -69,6 +70,7 @@ pub fn run(args: impl Iterator<Item = String>) -> Res<()> {
             "--progress" => progress = true,
             "--keep-tmp" => keep_tmp = true,
             "--no-color" => no_color = true,
+            "--trusted" => trusted = true,
             _ if arg.starts_with('-') => return Err(format!("Unknown option: {arg}").into()),
             _ if input.is_none() => input = Some(PathBuf::from(arg)),
             _ => return Err(format!("Unexpected argument: {arg}").into()),
@@ -95,8 +97,9 @@ pub fn run(args: impl Iterator<Item = String>) -> Res<()> {
         images,
         quiet: false,
         no_color,
+        trusted,
     })
 }
 fn help() {
-    println!("Usage: objtools import [OPTIONS] <file.obj|file.wrl|file.vrml|file.gltf|file.glb>\n\nImport OBJ, VRML IndexedFaceSet geometry, glTF or GLB into glTF 2.0 + external .bin.\n\n  -o, --output FILE  Destination .gltf (default: input with .gltf extension)\n      --center       Subtract bounding-box center before float32 encoding\n      --up-axis AXIS Source up axis: y (default) or z; output is Y-up\n      --tmp-dir DIR  Disk-backed geometry spools (default: output directory)\n      --keep-tmp     Keep conversion workspace for debugging\n      --images MODE  auto (default), keep source references, or copy images\n      --convert-images BOOL  auto (default), true or false\n      --image-format FORMAT  jpg (default) or png\n      --image-quality N      JPG quality 1..100 (default: 95)\n      --no-color     Drop OBJ vertex colors\n      --progress     Report conversion progress on stderr\n  -h, --help         Show help");
+    println!("Usage: objtools import [OPTIONS] <file.obj|file.wrl|file.vrml|file.gltf|file.glb>\n\nImport OBJ, VRML IndexedFaceSet geometry, glTF or GLB into glTF 2.0 + external .bin.\n\n  -o, --output FILE  Destination .gltf (default: input with .gltf extension)\n      --center       Subtract bounding-box center before float32 encoding\n      --up-axis AXIS Source up axis: y (default) or z; output is Y-up\n      --tmp-dir DIR  Disk-backed geometry spools (default: output directory)\n      --keep-tmp     Keep conversion workspace for debugging\n      --images MODE  auto (default), keep source references, or copy images\n      --convert-images BOOL  auto (default), true or false\n      --image-format FORMAT  jpg (default) or png\n      --image-quality N      JPG quality 1..100 (default: 95)\n      --no-color     Drop OBJ vertex colors\n      --trusted      Let the model refer to files outside its folder\n      --progress     Report conversion progress on stderr\n  -h, --help         Show help");
 }

@@ -9,6 +9,7 @@ use crate::{
     import,
     shared::{
         disk::{parent, Workspace},
+        references::References,
         Res,
     },
 };
@@ -20,6 +21,8 @@ pub struct Options {
     pub progress: bool,
     /// Print the report as JSON rather than pretty-printed.
     pub json: bool,
+    /// Follow file references anywhere, rather than only inside the input's directory.
+    pub trusted: bool,
 }
 pub fn run(opts: Options) -> Res<()> {
     let ext = opts
@@ -39,8 +42,9 @@ pub fn run(opts: Options) -> Res<()> {
         .tmp_dir
         .unwrap_or_else(|| parent(&opts.input).to_owned());
     let workspace = Workspace::create(&tmp_dir, opts.keep_tmp)?;
-    let gltf = if matches!(ext.as_str(), "gltf" | "glb") {
-        opts.input.clone()
+    let (gltf, references) = if matches!(ext.as_str(), "gltf" | "glb") {
+        let references = References::for_input(parent(&opts.input), opts.trusted)?;
+        (opts.input.clone(), references)
     } else {
         let output = workspace.path.join("model.gltf");
         import::run(import::Options {
@@ -50,6 +54,7 @@ pub fn run(opts: Options) -> Res<()> {
             progress: opts.progress,
             keep_tmp: opts.keep_tmp,
             quiet: true,
+            trusted: opts.trusted,
             // Images only need to be where the report can name them: this glTF is never
             // published, and image placement changes none of the figures.
             images: import::images::Options {
@@ -59,10 +64,18 @@ pub fn run(opts: Options) -> Res<()> {
             // Everything else follows import's defaults, so the figures are those of its output.
             ..Default::default()
         })?;
-        output
+        // Written by the import above, from references it had already confined. They lead out of
+        // the workspace to the source images, so this read has to be exempt.
+        (output, References::unrestricted())
     };
     let display_base = fs::canonicalize(parent(&opts.input))?;
-    let report = measure::measure(&gltf, &display_base, &workspace.path, opts.progress)?;
+    let report = measure::measure(
+        &gltf,
+        references,
+        &display_base,
+        &workspace.path,
+        opts.progress,
+    )?;
     // Only the report reaches stdout, so that it can be piped; warnings and progress use stderr.
     if opts.json {
         println!("{}", serde_json::to_string_pretty(&report)?);

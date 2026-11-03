@@ -556,6 +556,7 @@ fn write_with_limit(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shared::references::References;
     /// Primitive vertex counts after importing `obj` with a lowered vertex limit.
     fn import_with_limit(obj: &str, limit: u64) -> Vec<u64> {
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -575,7 +576,8 @@ mod tests {
             quiet: true,
             ..Default::default()
         };
-        let scene = obj::spool(&input, &dir, false, None, true).unwrap();
+        let scene =
+            obj::spool(&input, &dir, false, &References::unrestricted(), None, true).unwrap();
         write_with_limit(scene, &dir, &options, limit).unwrap();
         let root: Value = serde_json::from_slice(&fs::read(&output).unwrap()).unwrap();
         fs::remove_dir_all(&dir).unwrap();

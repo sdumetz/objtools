@@ -5,7 +5,7 @@ use super::{
     fixed::{parse_three_fixed, BBox},
     material::{self, Material},
 };
-use crate::shared::{failure::Context, Res};
+use crate::shared::{failure::Context, references::References, Res};
 use std::{
     collections::{HashMap, HashSet},
     fs::File,
@@ -100,9 +100,15 @@ pub fn spool(
     source: &Path,
     dir: &Path,
     progress: bool,
+    references: &References,
     texture_base: Option<&Path>,
     keep_colors: bool,
 ) -> Res<Scene> {
+    // A generated OBJ names its own MTL in the workspace, whereas its textures are the input's.
+    let libraries = match texture_base {
+        Some(_) => References::confined(dir)?,
+        None => references.clone(),
+    };
     let mut attrs = [
         BufWriter::new(File::create(dir.join("v"))?),
         BufWriter::new(File::create(dir.join("vt"))?),
@@ -303,11 +309,17 @@ pub fn spool(
                 }
                 "mtllib" => {
                     let parent = source.parent().unwrap_or(Path::new("."));
-                    if parent.join(rest).is_file() {
-                        material::load(&parent.join(rest), texture_base, &mut definitions)?;
+                    let mut load = |file: &Path| {
+                        material::load(file, references, texture_base, &mut definitions)
+                    };
+                    // One file name with spaces in it, or several names.
+                    let whole = libraries.resolve(parent, rest).ok();
+                    if let Some(file) = whole.filter(|file| file.is_file()) {
+                        load(&file)?;
                     } else {
                         for name in rest.split_whitespace() {
-                            material::load(&parent.join(name), texture_base, &mut definitions)?;
+                            let file = libraries.resolve(parent, name);
+                            load(&file.with_context(|| format!("mtllib {name}"))?)?;
                         }
                     }
                 }

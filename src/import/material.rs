@@ -1,5 +1,5 @@
 //! Conservative Phong -> PBR policy: no inferred metals, explicit specular extension.
-use crate::shared::{failure::Context, Res};
+use crate::shared::{failure::Context, references::References, Res};
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
@@ -230,6 +230,7 @@ fn color(rest: &str) -> Res<[f64; 3]> {
 }
 pub fn load(
     path: &Path,
+    references: &References,
     texture_base: Option<&Path>,
     materials: &mut HashMap<String, Material>,
 ) -> Res<()> {
@@ -294,12 +295,11 @@ pub fn load(
                             eprintln!("Warning: map_Kd {option} is ignored in {}", path.display());
                         }
                     }
-                    let name = rest.trim_matches('"').replace('\\', "/");
-                    m.texture = Some(
-                        texture_base
-                            .unwrap_or_else(|| path.parent().unwrap_or(Path::new(".")))
-                            .join(name),
-                    );
+                    let name = rest.trim_matches('"');
+                    let base =
+                        texture_base.unwrap_or_else(|| path.parent().unwrap_or(Path::new(".")));
+                    let file = references.resolve(base, name);
+                    m.texture = Some(file.with_context(|| format!("Texture {name}"))?);
                 }
                 "" | "ka" => {}
                 _ => {

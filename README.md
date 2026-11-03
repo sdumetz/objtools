@@ -32,6 +32,7 @@ objtools import [OPTIONS] <file.obj|file.wrl|file.vrml|file.gltf|file.glb>
     --image-format FORMAT  jpg (default) or png
     --image-quality N      JPEG quality 1..100 (default 95)
     --no-color     Drop vertex colors
+    --trusted      Let the model refer to files outside its folder
     --progress     Report reading and conversion progress on stderr
 -h, --help         Show help
 ```
@@ -60,6 +61,7 @@ objtools inspect [OPTIONS] <file.gltf|file.glb|file.obj|file.wrl|file.vrml>
     --tmp-dir DIR  Workspace for the import and coverage maps (default: the input's directory)
     --keep-tmp     Preserve the workspace for debugging
     --json         Print the statistics as JSON
+    --trusted      Let the model refer to files outside its folder
     --progress     Report progress on stderr
 -h, --help         Show help
 ```
@@ -97,6 +99,12 @@ Large figures use SI multipliers (k, M, G, T) with three significant digits. Occ
 Supported glTF inputs are `.gltf` and `.glb`, with external, embedded or base64 `data:` buffers and images, indexed or non-indexed triangles, strips or fans, float or normalized integer UVs, sparse accessors, and the texture's selected `TEXCOORD_n`. `data:` URIs are decoded into the workspace, but their text is held in memory while the JSON is parsed, so very large models are better stored in external or GLB buffers.
 
 Textures using `KHR_texture_basisu`, `EXT_texture_webp` or `EXT_texture_avif` are measured from the extension's image rather than its fallback, and only their headers are read. A file that requires an extension `inspect` doesn't support is rejected, which includes Draco and meshopt compression. Optional compression is skipped when the file also has uncompressed data, and any other unknown optional extension is ignored with a warning. Material variants (`KHR_materials_variants`) aren't supported, and a warning says so: occupancy comes only from each primitive's default material, so a texture only the variants use counts as unoccupied.
+
+## Models from other people
+
+By default, `import` and `inspect` only follow a file reference in a model (a glTF buffer or image, an OBJ `mtllib`, an MTL `map_Kd`, a VRML `url`) to a regular file inside the input's folder. A model can't read anything else on the machine, and a reference that fails gets the same message whether the file is missing or forbidden. A texture that can't be reached fails the import, as a missing one does.
+
+A reference may use `..` as long as it stays inside the folder. Absolute paths, drive letters, URLs and symlinks leading out are refused. `--trusted` turns this off for a model you know: references may then point anywhere, including through symlinks.
 
 ## Exit codes
 

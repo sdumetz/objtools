@@ -8,6 +8,7 @@ pub mod matrix;
 use super::{
     disk::{map, parent},
     failure::Context,
+    references::References,
     Res,
 };
 pub use accessor::Accessor;
@@ -24,6 +25,7 @@ const GLB_BIN: usize = 0x004e_4942;
 pub struct Gltf {
     pub root: Value,
     base: PathBuf,
+    references: References,
     buffers: Vec<(Mmap, Range<usize>)>,
     /// Images that were `data:` URIs, by image index.
     embedded: BTreeMap<usize, Mmap>,
@@ -64,7 +66,7 @@ pub fn uri(name: &str) -> String {
     out
 }
 /// Undo URI path escaping; `uri` writes `%XX` for every byte outside the unreserved set.
-fn decode_uri(uri: &str) -> Res<PathBuf> {
+fn decode_uri(uri: &str) -> Res<String> {
     let bytes = uri.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -78,7 +80,7 @@ fn decode_uri(uri: &str) -> Res<PathBuf> {
             i += 1;
         }
     }
-    Ok(PathBuf::from(String::from_utf8(out)?))
+    Ok(String::from_utf8(out)?)
 }
 /// The byte ranges of a GLB's JSON and BIN chunks. Unknown chunks are skipped, as the spec asks.
 fn glb_chunks(file: &[u8]) -> Res<(Range<usize>, Option<Range<usize>>)> {
@@ -114,7 +116,7 @@ impl Gltf {
     /// A GLB is recognized by its content rather than its file extension, as in three.js's
     /// `GLTFLoader`. Extensions are checked first, so a file needing an unsupported one reports
     /// that rather than a symptom such as a buffer without data.
-    pub fn open(path: &Path, workspace: &Path) -> Res<Self> {
+    pub fn open(path: &Path, workspace: &Path, references: References) -> Res<Self> {
         let in_file = || path.display().to_string();
         let file = map(path).with_context(in_file)?;
         let (mut root, mut bin): (Value, _) = if file.starts_with(b"glTF") {
@@ -140,7 +142,9 @@ impl Gltf {
                     (map, whole)
                 }
                 Some(uri) => {
-                    let file = base.join(decode_uri(uri)?);
+                    let file = references
+                        .resolve(&base, &decode_uri(uri)?)
+                        .with_context(|| format!("Buffer {i}"))?;
                     label = file.display().to_string();
                     let map = map(&file).with_context(|| label.clone())?;
                     let whole = 0..map.len();
@@ -168,6 +172,7 @@ impl Gltf {
         Ok(Self {
             root,
             base,
+            references,
             buffers,
             embedded,
         })
@@ -194,7 +199,8 @@ impl Gltf {
         }
         let image = element(&self.root, "images", id)?;
         if let Some(uri) = image["uri"].as_str() {
-            return Ok(Image::File(self.base.join(decode_uri(uri)?)));
+            let file = self.references.resolve(&self.base, &decode_uri(uri)?);
+            return Ok(Image::File(file.with_context(|| format!("Texture {id}"))?));
         }
         let (bytes, _) = self.view(index(&image["bufferView"], "bufferView")?)?;
         Ok(Image::Bytes(bytes))

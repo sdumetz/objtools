@@ -15,6 +15,7 @@ mod vrml;
 use crate::shared::{
     disk::{parent, Workspace},
     failure::{Context, JobDirectory},
+    references::References,
     Res,
 };
 use std::{fs, path::PathBuf};
@@ -32,6 +33,8 @@ pub struct Options {
     pub quiet: bool,
     /// Drop OBJ vertex colours instead of writing `COLOR_0`/`_COLOR`.
     pub no_color: bool,
+    /// Follow file references anywhere, rather than only inside the input's directory.
+    pub trusted: bool,
 }
 pub fn run(opts: Options) -> Res<()> {
     let ext = opts
@@ -53,9 +56,11 @@ pub fn run(opts: Options) -> Res<()> {
     fs::metadata(parent(&opts.output))
         .map_err(JobDirectory)
         .with_context(|| "Output directory".into())?;
+    let references = References::for_input(parent(&opts.input), opts.trusted)
+        .with_context(|| "Input directory".into())?;
     let workspace = Workspace::create(&opts.tmp_dir, opts.keep_tmp)?;
     if matches!(ext.as_str(), "gltf" | "glb") {
-        return from_gltf::convert(&opts, &workspace.path);
+        return from_gltf::convert(&opts, &workspace.path, references);
     }
     let source = if ext == "obj" {
         opts.input.clone()
@@ -72,6 +77,7 @@ pub fn run(opts: Options) -> Res<()> {
         &source,
         &workspace.path,
         opts.progress,
+        &references,
         if ext == "obj" {
             None
         } else {

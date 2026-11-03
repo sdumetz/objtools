@@ -8,6 +8,7 @@ use crate::shared::{
     failure::Context,
     format::fmt_count,
     gltf::{container_size, element, extensions, index, Accessor, Gltf, Image},
+    references::References,
     Res,
 };
 use serde_json::Value;
@@ -105,8 +106,14 @@ fn dimensions(gltf: &Gltf, id: usize, display_base: &Path) -> Res<(String, u32, 
 }
 /// Each mesh is counted once, however many nodes instance it, and a POSITION accessor shared
 /// by several primitives counts its vertices once.
-pub fn measure(path: &Path, display_base: &Path, workspace: &Path, progress: bool) -> Res<Report> {
-    let gltf = Gltf::open(path, workspace)?;
+pub fn measure(
+    path: &Path,
+    references: References,
+    display_base: &Path,
+    workspace: &Path,
+    progress: bool,
+) -> Res<Report> {
+    let gltf = Gltf::open(path, workspace, references)?;
     let root = &gltf.root;
     // Every image a material samples as its base colour, in image order.
     let mut textures = BTreeMap::new();
