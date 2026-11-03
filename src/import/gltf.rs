@@ -447,8 +447,8 @@ fn write_with_limit(
         material_ids.insert((old_id, textured), materials.len());
         let mut blend = false;
         let texture = if let Some(path) = m.texture.as_ref().filter(|_| textured) {
-            let path =
-                fs::canonicalize(path).with_context(|| format!("Texture {}", path.display()))?;
+            let path = fs::canonicalize(path)
+                .with_context(|| format!("Texture {}", crate::shared::diagnostics::shown(path)))?;
             let plan = &image_plans[&path];
             blend = transparent.contains(&path);
             let image = match image_ids.get(&path) {
@@ -546,7 +546,7 @@ fn write_with_limit(
     if !quiet {
         crate::say!(
             "Wrote {} ({face_count} faces, {} meshes, {} bytes of geometry)",
-            output.display(),
+            crate::shared::diagnostics::shown(output),
             root["meshes"].as_array().unwrap().len(),
             document.offset
         );
@@ -556,7 +556,7 @@ fn write_with_limit(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shared::references::References;
+    use crate::{import::material::Origin, shared::references::References};
     /// Primitive vertex counts after importing `obj` with a lowered vertex limit.
     fn import_with_limit(obj: &str, limit: u64) -> Vec<u64> {
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -576,8 +576,15 @@ mod tests {
             quiet: true,
             ..Default::default()
         };
-        let scene =
-            obj::spool(&input, &dir, false, &References::unrestricted(), None, true).unwrap();
+        let scene = obj::spool(
+            &input,
+            &dir,
+            false,
+            &References::unrestricted(),
+            Origin::Model,
+            true,
+        )
+        .unwrap();
         write_with_limit(scene, &dir, &options, limit).unwrap();
         let root: Value = serde_json::from_slice(&fs::read(&output).unwrap()).unwrap();
         fs::remove_dir_all(&dir).unwrap();

@@ -218,7 +218,7 @@ pub fn convert(opts: &Options, workspace: &std::path::Path, references: Referenc
     if !opts.quiet {
         crate::say!(
             "Wrote {} ({} faces, {mesh_count} meshes, {} bytes of geometry)",
-            opts.output.display(),
+            crate::shared::diagnostics::shown(&opts.output),
             geometry.faces,
             output.length
         );

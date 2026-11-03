@@ -39,7 +39,11 @@ pub fn run(opts: Options) -> Res<()> {
         .into());
     }
     if !opts.input.is_file() {
-        return Err(format!("{}: no such file", opts.input.display()).into());
+        return Err(format!(
+            "{}: no such file",
+            crate::shared::diagnostics::shown(&opts.input)
+        )
+        .into());
     }
     // Like import's, this workspace defaults to a real disk rather than a RAM-backed /tmp.
     let tmp_dir = opts

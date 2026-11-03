@@ -117,7 +117,7 @@ impl Gltf {
     /// `GLTFLoader`. Extensions are checked first, so a file needing an unsupported one reports
     /// that rather than a symptom such as a buffer without data.
     pub fn open(path: &Path, workspace: &Path, references: References) -> Res<Self> {
-        let in_file = || path.display().to_string();
+        let in_file = || crate::shared::diagnostics::shown(path);
         let file = map(path).with_context(in_file)?;
         let (mut root, mut bin): (Value, _) = if file.starts_with(b"glTF") {
             let (json, bin) = glb_chunks(&file).with_context(in_file)?;
@@ -145,7 +145,7 @@ impl Gltf {
                     let file = references
                         .resolve(&base, &decode_uri(uri)?)
                         .with_context(|| format!("Buffer {i}"))?;
-                    label = file.display().to_string();
+                    label = crate::shared::diagnostics::shown(&file);
                     let map = map(&file).with_context(|| label.clone())?;
                     let whole = 0..map.len();
                     (map, whole)

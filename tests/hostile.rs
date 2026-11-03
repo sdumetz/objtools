@@ -420,13 +420,6 @@ fn encoded_uris_are_decoded_exactly_once() {
         u.assert_refused(input);
     }
 }
-/// Workspace names are random, and they reach stderr through a generated file's path.
-fn without_workspace(stderr: &str) -> String {
-    let parts = stderr
-        .split('/')
-        .filter(|part| !part.starts_with("objtools-"));
-    parts.collect::<Vec<_>>().join("/")
-}
 #[test]
 fn a_missing_file_and_a_forbidden_one_look_the_same() {
     for (kind, secret) in KINDS {
@@ -440,11 +433,7 @@ fn a_missing_file_and_a_forbidden_one_look_the_same() {
             &format!("../outside/{}", secret.replace("secret", "absent")),
         );
         let missing = u.stderr_of(&["import", input, "-o", "out.gltf"]);
-        assert_eq!(
-            without_workspace(&forbidden.replace("secret", "absent")),
-            without_workspace(&missing),
-            "{kind:?}"
-        );
+        assert_eq!(forbidden.replace("secret", "absent"), missing, "{kind:?}");
     }
 }
 #[test]
@@ -547,7 +536,7 @@ fn a_real_absolute_path_only_ever_opens_the_copy_in_the_folder() {
     assert_eq!(report["textures"][0]["width"], 8, "{report}");
 }
 #[test]
-fn a_relative_path_is_not_retried_by_name() {
+fn a_relative_path_is_not_looked_for_by_name() {
     for (kind, secret) in KINDS {
         let u = Upload::new();
         fs::copy(u.0 .0.join("outside").join(secret), u.job().join(secret)).unwrap();
@@ -681,4 +670,67 @@ fn the_report_of_inspect_cleans_texture_names_but_its_json_keeps_them() {
     let json = u.run(&["inspect", "m.gltf", "--json"]);
     let json: Value = serde_json::from_slice(&json.stdout).unwrap();
     assert_eq!(json["textures"][0]["name"], name);
+}
+/// Run with absolute paths, which are what would show if a message printed them.
+#[track_caller]
+fn assert_no_machine_path(u: &Upload, args: &[&str]) {
+    let job = u.job();
+    let job = fs::canonicalize(&job).unwrap_or(job);
+    let out = u.run(args);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let parent = job.parent().unwrap().to_string_lossy();
+    assert!(!stderr.contains(&*parent), "{args:?}: {stderr}");
+    assert!(!stderr.contains("objtools-"), "{args:?}: {stderr}");
+}
+#[test]
+fn no_message_shows_where_the_job_runs() {
+    for (kind, _) in KINDS {
+        let u = Upload::new();
+        let input = write_reference(&u, kind, "missing.png");
+        let job = fs::canonicalize(u.job()).unwrap();
+        let (input, output) = (job.join(input), job.join("out.gltf"));
+        let (input, output) = (input.to_str().unwrap(), output.to_str().unwrap());
+        assert_no_machine_path(&u, &["import", input, "-o", output]);
+        assert_no_machine_path(&u, &["inspect", input]);
+    }
+}
+#[test]
+fn a_finished_import_names_its_output_without_the_folder() {
+    let u = Upload::new();
+    u.write("m.obj", "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n");
+    let job = fs::canonicalize(u.job()).unwrap();
+    let (input, output) = (job.join("m.obj"), job.join("out.gltf"));
+    let out = u.run(&[
+        "import",
+        input.to_str().unwrap(),
+        "-o",
+        output.to_str().unwrap(),
+    ]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    assert!(stderr.contains("Wrote out.gltf ("), "{stderr}");
+}
+#[test]
+fn an_error_in_a_bad_line_names_the_file_by_its_name() {
+    let u = Upload::new();
+    u.write("m.obj", "v 0 0 oops\n");
+    let job = fs::canonicalize(u.job()).unwrap();
+    let (input, output) = (job.join("m.obj"), job.join("out.gltf"));
+    let args = [
+        "import",
+        input.to_str().unwrap(),
+        "-o",
+        output.to_str().unwrap(),
+    ];
+    assert!(u.stderr_of(&args).contains("Error: m.obj:1: "));
+}
+#[test]
+fn an_error_in_a_generated_file_names_the_vrml_it_came_from() {
+    let u = Upload::new();
+    u.write("m.wrl", &vrml_with_url("missing.png"));
+    let stderr = u.stderr_of(&["import", "m.wrl", "-o", "out.gltf"]);
+    assert!(
+        stderr.contains("Error: m.wrl: Texture missing.png: "),
+        "{stderr}"
+    );
 }

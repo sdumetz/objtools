@@ -2,6 +2,7 @@
 //! has to be safe to show as it stands, with nothing left for the host to strip.
 #[cfg(not(test))]
 use std::io::{self, Write};
+use std::path::Path;
 
 /// Long enough for any message objtools composes. Text from a file is capped well below this.
 const MAX_LINE: usize = 512;
@@ -40,6 +41,12 @@ pub fn safe(text: &str) -> String {
         out.push_str("...");
     }
     out
+}
+/// A path for a message: only its file name, so that the layout of the machine never shows, and
+/// a long path can't push the name past the cap.
+pub fn shown(path: &Path) -> String {
+    let name = path.file_name().map(|name| name.to_string_lossy());
+    safe(name.as_deref().unwrap_or("file"))
 }
 /// The backstop under every message, for text that no call site cleaned, such as what a library
 /// quotes from the input in its error. One message stays on one line, and can neither drive a
@@ -91,6 +98,12 @@ mod tests {
         let cut = safe(&"é".repeat(MAX_TEXT + 1));
         assert_eq!(cut.chars().count(), MAX_TEXT);
         assert!(cut.ends_with("é..."), "{cut}");
+    }
+    #[test]
+    fn a_path_shows_only_its_name() {
+        assert_eq!(shown(Path::new("/srv/job/textures/a.png")), "a.png");
+        assert_eq!(shown(Path::new("textures/../a.png")), "a.png");
+        assert_eq!(shown(Path::new("/")), "file");
     }
     #[test]
     fn a_message_stays_as_written() {

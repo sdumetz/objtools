@@ -1,5 +1,10 @@
 //! Conservative Phong -> PBR policy: no inferred metals, explicit specular extension.
-use crate::shared::{diagnostics::safe, failure::Context, references::References, Res};
+use crate::shared::{
+    diagnostics::{safe, shown},
+    failure::Context,
+    references::References,
+    Res,
+};
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
@@ -233,13 +238,25 @@ fn color(rest: &str) -> Res<[f64; 3]> {
         finite(v[2])?.clamp(0., 1.),
     ])
 }
+/// Whose an OBJ or MTL file is, which decides what its references and errors mean.
+#[derive(Clone, Copy)]
+pub enum Origin<'a> {
+    /// The model's own: its paths are relative to it, and its lines mean something to its author.
+    Model,
+    /// Generated in the workspace from `input`, whose folder its textures are relative to.
+    GeneratedFrom(&'a Path),
+}
 pub fn load(
     path: &Path,
     references: &References,
-    texture_base: Option<&Path>,
+    origin: Origin,
     materials: &mut HashMap<String, Material>,
 ) -> Res<()> {
-    let reader = BufReader::new(File::open(path).with_context(|| path.display().to_string())?);
+    let file = || match origin {
+        Origin::Model => shown(path),
+        Origin::GeneratedFrom(input) => shown(input),
+    };
+    let reader = BufReader::new(File::open(path).with_context(file)?);
     let mut current: Option<Material> = None;
     let mut unsupported = std::collections::HashSet::new();
     for (line_no, line) in reader.lines().enumerate() {
@@ -286,7 +303,7 @@ pub fn load(
                     Ok(tf) => m.transmission_filter = Some(tf),
                     Err(e) => {
                         if unsupported.insert(key.to_owned()) {
-                            crate::say!("Warning: {key} ignored in {}: {e}", path.display());
+                            crate::say!("Warning: {key} ignored in {}: {e}", file());
                         }
                     }
                 },
@@ -300,13 +317,16 @@ pub fn load(
                             crate::say!(
                                 "Warning: map_Kd {} is ignored in {}",
                                 safe(option),
-                                path.display()
+                                file()
                             );
                         }
                     }
                     let name = rest.trim_matches('"');
-                    let base =
-                        texture_base.unwrap_or_else(|| path.parent().unwrap_or(Path::new(".")));
+                    let beside = match origin {
+                        Origin::Model => path,
+                        Origin::GeneratedFrom(input) => input,
+                    };
+                    let base = beside.parent().unwrap_or(Path::new("."));
                     let file = references.resolve(base, name);
                     m.texture = Some(file.with_context(|| format!("Texture {}", safe(name)))?);
                 }
@@ -316,14 +336,18 @@ pub fn load(
                         crate::say!(
                             "Warning: unsupported MTL property {} in {}",
                             safe(written),
-                            path.display()
+                            file()
                         );
                     }
                 }
             }
             Ok(())
         })();
-        result.with_context(|| format!("{}:{}", path.display(), line_no + 1))?;
+        match origin {
+            Origin::Model => result.with_context(|| format!("{}:{}", shown(path), line_no + 1))?,
+            // The generated OBJ's own error already names the input.
+            Origin::GeneratedFrom(_) => result?,
+        }
     }
     if let Some(m) = current {
         materials.insert(m.name.clone(), m);

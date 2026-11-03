@@ -156,7 +156,7 @@ pub fn prepare_gltf_image(
     output: &Path,
     workspace: &Path,
 ) -> Res<Plan> {
-    let label = || format!("Texture {}", image.path.display());
+    let label = || format!("Texture {}", crate::shared::diagnostics::shown(image.path));
     let mut header = [0; 64];
     let mut file = File::open(image.path).with_context(label)?;
     let mut read = 0;
@@ -310,8 +310,8 @@ pub fn prepare(
         let Some(path) = &material.texture else {
             continue;
         };
-        let source =
-            fs::canonicalize(path).with_context(|| format!("Texture {}", path.display()))?;
+        let source = fs::canonicalize(path)
+            .with_context(|| format!("Texture {}", crate::shared::diagnostics::shown(path)))?;
         if plans.contains_key(&source) {
             continue;
         }
@@ -334,7 +334,7 @@ pub fn prepare(
         let supported = matches!(ext.as_str(), "jpg" | "jpeg" | "png");
         let convert = options.convert.unwrap_or(!supported);
         if !supported && !convert {
-            return Err(format!("Texture {} has unsupported glTF image format .{} with --convert-images=false; enable conversion", source.display(), crate::shared::diagnostics::safe(&ext)).into());
+            return Err(format!("Texture {} has unsupported glTF image format .{} with --convert-images=false; enable conversion", crate::shared::diagnostics::shown(&source), crate::shared::diagnostics::safe(&ext)).into());
         }
         let copy = convert
             || match options.mode {
@@ -350,13 +350,18 @@ pub fn prepare(
         let name = format!("{stem}_texture_{}.{output_ext}", plans.len());
         let content = if convert {
             let converted = workspace.join(&name);
-            convert_image(&source, &converted, options)
-                .with_context(|| format!("Converting texture {}", source.display()))?;
+            convert_image(&source, &converted, options).with_context(|| {
+                format!(
+                    "Converting texture {}",
+                    crate::shared::diagnostics::shown(&source)
+                )
+            })?;
             converted
         } else {
             source.clone()
         };
-        check_image(&content).with_context(|| format!("Texture {}", source.display()))?;
+        check_image(&content)
+            .with_context(|| format!("Texture {}", crate::shared::diagnostics::shown(&source)))?;
         let uri = if copy {
             uri(&name)
         } else {
@@ -386,7 +391,7 @@ fn convert_image(source: &Path, destination: &Path, options: &Options) -> Res<()
             let rgb = if decoded.has_alpha() {
                 let mut rgba = decoded.to_rgba8();
                 if rgba.pixels().any(|p| p[3] != 255) {
-                    crate::say!("Warning: converting {} to JPG composites transparency onto white; use --image-format png to preserve alpha", source.display());
+                    crate::say!("Warning: converting {} to JPG composites transparency onto white; use --image-format png to preserve alpha", crate::shared::diagnostics::shown(source));
                 }
                 for p in rgba.pixels_mut() {
                     for i in 0..3 {
@@ -418,7 +423,12 @@ pub fn scan_transparency(
     thread::spawn(move || {
         let mut transparent = HashSet::new();
         for (source, content) in jobs {
-            if texture_alpha(&content).map_err(|e| format!("Texture {}: {e}", source.display()))? {
+            if texture_alpha(&content).map_err(|e| {
+                format!(
+                    "Texture {}: {e}",
+                    crate::shared::diagnostics::shown(&source)
+                )
+            })? {
                 transparent.insert(source);
             }
         }

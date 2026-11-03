@@ -3,9 +3,14 @@
 //! Spools are written sequentially, then memory-mapped for the random-access replay.
 use super::{
     fixed::{parse_three_fixed, BBox},
-    material::{self, Material},
+    material::{self, Material, Origin},
 };
-use crate::shared::{diagnostics::safe, failure::Context, references::References, Res};
+use crate::shared::{
+    diagnostics::{safe, shown},
+    failure::Context,
+    references::References,
+    Res,
+};
 use std::{
     collections::{HashMap, HashSet},
     fs::File,
@@ -101,13 +106,18 @@ pub fn spool(
     dir: &Path,
     progress: bool,
     references: &References,
-    texture_base: Option<&Path>,
+    origin: Origin,
     keep_colors: bool,
 ) -> Res<Scene> {
     // A generated OBJ names its own MTL in the workspace, whereas its textures are the input's.
-    let libraries = match texture_base {
-        Some(_) => References::confined(dir)?,
-        None => references.clone(),
+    let libraries = match origin {
+        Origin::Model => references.clone(),
+        Origin::GeneratedFrom(_) => References::confined(dir)?,
+    };
+    // A line of a generated OBJ means nothing to whoever supplied the input.
+    let location = |line: usize| match origin {
+        Origin::Model => format!("{}:{line}", shown(source)),
+        Origin::GeneratedFrom(input) => shown(input),
     };
     let mut attrs = [
         BufWriter::new(File::create(dir.join("v"))?),
@@ -178,8 +188,8 @@ pub fn spool(
             }
             if joined.len() + head.len() >= 1024 * 1024 {
                 return Err(format!(
-                    "{}:{start_line}: OBJ statement exceeds 1 MiB limit",
-                    source.display()
+                    "{}: OBJ statement exceeds 1 MiB limit",
+                    location(start_line)
                 )
                 .into());
             }
@@ -309,9 +319,8 @@ pub fn spool(
                 }
                 "mtllib" => {
                     let parent = source.parent().unwrap_or(Path::new("."));
-                    let mut load = |file: &Path| {
-                        material::load(file, references, texture_base, &mut definitions)
-                    };
+                    let mut load =
+                        |file: &Path| material::load(file, references, origin, &mut definitions);
                     // One file name with spaces in it, or several names.
                     let whole = libraries.resolve(parent, rest).ok();
                     if let Some(file) = whole.filter(|file| file.is_file()) {
@@ -376,7 +385,7 @@ pub fn spool(
             }
             Ok(())
         })();
-        result.with_context(|| format!("{}:{start_line}", source.display()))?;
+        result.with_context(|| location(start_line))?;
         joined.clear();
         if eof {
             break;

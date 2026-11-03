@@ -12,6 +12,7 @@ mod smooth;
 mod triangulate;
 mod vrml;
 
+use self::material::Origin;
 use crate::shared::{
     disk::{parent, Workspace},
     failure::{Context, JobDirectory},
@@ -74,20 +75,17 @@ pub fn run(mut opts: Options) -> Res<()> {
         vrml::convert(&opts.input, &intermediate, &workspace.path, opts.progress)?;
         intermediate
     };
-    let texture_base = opts
-        .input
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."));
+    let origin = if ext == "obj" {
+        Origin::Model
+    } else {
+        Origin::GeneratedFrom(&opts.input)
+    };
     let scene = obj::spool(
         &source,
         &workspace.path,
         opts.progress,
         &references,
-        if ext == "obj" {
-            None
-        } else {
-            Some(texture_base)
-        },
+        origin,
         !opts.no_color,
     )?;
     gltf::write(scene, &workspace.path, &opts)

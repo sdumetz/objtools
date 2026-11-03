@@ -215,7 +215,7 @@ mod tests {
         }
     }
     #[test]
-    fn only_absolute_paths_are_retried() {
+    fn only_absolute_paths_are_looked_for_by_name() {
         let f = Fixture::new("relative");
         for reference in [
             "sub/dir/m.bin",
@@ -228,9 +228,9 @@ mod tests {
     }
     #[cfg(unix)]
     #[test]
-    fn the_retry_is_held_to_the_same_checks() {
+    fn the_lookup_by_name_is_held_to_the_same_checks() {
         use std::os::unix::fs::symlink;
-        let f = Fixture::new("retry");
+        let f = Fixture::new("lookup");
         symlink(f.0.join("outside/s.txt"), f.job().join("s.txt")).unwrap();
         assert_eq!(f.found("", "C:\\Users\\bob\\s.txt"), None);
     }
