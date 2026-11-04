@@ -895,19 +895,23 @@ fn what_a_link_or_special_file_is_cant_be_told_from_a_missing_one() {
         assert_look_the_same(kind, "/dev/zero", "/dev/absent", |_| {});
     }
 }
+#[cfg(unix)]
 #[test]
-fn a_vrml_file_name_cannot_add_a_library_to_the_generated_obj() {
-    // The generated OBJ records the input's name in a comment, which a newline would end.
-    let u = Upload::new();
-    let name = "in\nmtllib ../../outside/secret.mtl\n.wrl";
-    if fs::write(u.job().join(name), vrml_with_url("t.png")).is_err() {
-        return; // Windows doesn't allow this name.
+fn a_vrml_file_name_adds_nothing_to_the_generated_obj() {
+    for name in [
+        "in\nmtllib secret.mtl\n.wrl",
+        "in\nv 9 9 9\nv 8 8 8\nv 7 7 7\nf 1 2 3\n.wrl",
+    ] {
+        let u = Upload::new();
+        fs::write(u.job().join(name), vrml_with_url("t.png")).unwrap();
+        write_own_copy(&u, "t.png", "t.png");
+        let out = u.run(&["inspect", name, "--json"]);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(0), "{name:?}: {stderr}");
+        let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(report["faces"], 1, "{name:?}: {report}");
+        assert!(!stderr.contains("Warning"), "{name:?}: {stderr}");
     }
-    image::RgbImage::new(4, 4)
-        .save(u.job().join("t.png"))
-        .unwrap();
-    let stderr = u.stderr_of(&["import", name, "-o", "out.gltf"]);
-    assert!(stderr.contains(REFUSED), "{stderr}");
 }
 #[cfg(unix)]
 #[test]
@@ -1077,16 +1081,18 @@ fn nothing_in_a_model_is_run_or_included() {
     assert!(!u.job().join("pwned").exists());
 }
 #[test]
-fn a_line_added_through_a_vrml_url_is_held_to_the_same_rules() {
-    write_vrml_url_lines("t.png\nmap_Kd ../outside/secret.png");
-    write_vrml_url_lines("t.png\r\nmap_Kd ../outside/secret.png");
-}
-fn write_vrml_url_lines(url: &str) {
-    // A string can hold a newline, which then starts a line of the generated library.
-    let u = Upload::new();
-    write_own_copy(&u, "t.png", "t.png");
-    u.write("in.wrl", &vrml_with_url(url));
-    u.assert_refused("in.wrl");
+fn a_vrml_url_cannot_add_a_line_to_the_generated_library() {
+    for url in [
+        "t.png\nmap_Kd ../outside/secret.png",
+        "t.png\r\nmap_Kd ../outside/secret.png",
+        "t.png\nKd 1 0 0",
+        "t.png\rKd 1 0 0",
+    ] {
+        let u = Upload::new();
+        write_own_copy(&u, "t.png", "t.png");
+        u.write("in.wrl", &vrml_with_url(url));
+        u.assert_refused("in.wrl");
+    }
 }
 #[cfg(unix)]
 #[test]
