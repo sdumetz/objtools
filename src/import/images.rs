@@ -3,7 +3,7 @@ use super::material::Material;
 use crate::shared::{
     diagnostics::{shown, Tally},
     disk::parent,
-    failure::Context,
+    failure::{Context, Usage},
     gltf::uri,
     Res,
 };
@@ -295,7 +295,10 @@ fn relative_uri(source: &Path, destination: &Path) -> Res<String> {
 /// unless the user vouches for it, and `--images auto` copies rather than getting here.
 fn kept_uri(source: &Path, destination: &Path, options: &Options) -> Res<String> {
     if !options.outside_references && !source.starts_with(destination) {
-        return Err("--images keep would refer outside the output's folder; use --images copy, or --trusted to allow it".into());
+        // Confined images are all beneath the input's folder, so this needs an output folder that
+        // doesn't hold the input's: the command line's doing, not the file's.
+        let message = "--images keep would refer outside the output's folder; use --images copy, or --trusted to allow it";
+        return Err(Usage(message.into()).into());
     }
     relative_uri(source, destination)
 }

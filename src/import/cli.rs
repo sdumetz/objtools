@@ -1,8 +1,15 @@
 //! The `import` command line.
 use super::images;
-use crate::shared::Res;
+use crate::shared::{failure::Usage, Res};
 use std::path::{Path, PathBuf};
 pub fn run(args: impl Iterator<Item = String>) -> Res<()> {
+    match parse(args).map_err(Usage)? {
+        Some(options) => super::run(options),
+        None => Ok(()),
+    }
+}
+/// `None` when there is nothing to run, as after `--help`.
+fn parse(args: impl Iterator<Item = String>) -> Res<Option<super::Options>> {
     let mut args = args;
     let mut input = None;
     let mut output = None;
@@ -18,7 +25,7 @@ pub fn run(args: impl Iterator<Item = String>) -> Res<()> {
         match arg.as_str() {
             "--help" | "-h" => {
                 help();
-                return Ok(());
+                return Ok(None);
             }
             "-o" | "--output" => {
                 output = Some(PathBuf::from(
@@ -80,13 +87,16 @@ pub fn run(args: impl Iterator<Item = String>) -> Res<()> {
         return Err("--image-quality must be 1..100".into());
     }
     let input = input.ok_or("Missing input file")?;
-    let output = output.unwrap_or_else(|| input.with_extension("gltf"));
+    let output: PathBuf = output.unwrap_or_else(|| input.with_extension("gltf"));
+    if output.extension().and_then(|s| s.to_str()) != Some("gltf") {
+        return Err("Output must have a .gltf extension".into());
+    }
     // Spools can exceed RAM, and the OS temporary directory is often RAM-backed (tmpfs).
     let tmp_dir = tmp_dir.unwrap_or_else(|| {
         let parent = output.parent().filter(|p| !p.as_os_str().is_empty());
         parent.unwrap_or(Path::new(".")).to_owned()
     });
-    super::run(super::Options {
+    Ok(Some(super::Options {
         input,
         output,
         tmp_dir,
@@ -98,7 +108,7 @@ pub fn run(args: impl Iterator<Item = String>) -> Res<()> {
         quiet: false,
         no_color,
         trusted,
-    })
+    }))
 }
 fn help() {
     println!("Usage: objtools import [OPTIONS] <file.obj|file.wrl|file.vrml|file.gltf|file.glb>\n\nImport OBJ, VRML IndexedFaceSet geometry, glTF or GLB into glTF 2.0 + external .bin.\n\n  -o, --output FILE  Destination .gltf (default: input with .gltf extension)\n      --center       Subtract bounding-box center before float32 encoding\n      --up-axis AXIS Source up axis: y (default) or z; output is Y-up\n      --tmp-dir DIR  Disk-backed geometry spools (default: output directory)\n      --keep-tmp     Keep conversion workspace for debugging\n      --images MODE  auto (default), keep source references, or copy images\n      --convert-images BOOL  auto (default), true or false\n      --image-format FORMAT  jpg (default) or png\n      --image-quality N      JPG quality 1..100 (default: 95)\n      --no-color     Drop OBJ vertex colors\n      --trusted      Let the model refer to files outside its folder\n      --progress     Report conversion progress on stderr\n  -h, --help         Show help");

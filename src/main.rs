@@ -26,7 +26,8 @@ fn run() -> Res<()> {
         Some("import") => import::cli::run(args),
         Some("inspect") => inspect::cli::run(args),
         Some(other) => {
-            Err(format!("Unknown command {other}. Run objtools --help for usage.").into())
+            let message = format!("Unknown command {other}. Run objtools --help for usage.");
+            Err(failure::Usage(message.into()).into())
         }
     }
 }

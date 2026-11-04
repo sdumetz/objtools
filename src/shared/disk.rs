@@ -8,6 +8,7 @@ use std::{
     collections::hash_map::RandomState,
     fs::{self, File, OpenOptions},
     hash::{BuildHasher, Hasher},
+    io::{self, ErrorKind},
     path::{Path, PathBuf},
 };
 /// A private directory removed on drop, including when a command bails out early.
@@ -26,6 +27,17 @@ impl Workspace {
             .map_err(JobDirectory)
             .with_context(|| "Workspace directory".into())?;
         Ok(Self { path, keep })
+    }
+}
+impl Workspace {
+    /// A workspace removed under a running job shows up as a missing file, which would otherwise
+    /// read as a reference in the model leading nowhere.
+    pub fn explain<T>(&self, result: Res<T>) -> Res<T> {
+        if result.is_err() && !self.path.is_dir() {
+            let gone = io::Error::new(ErrorKind::NotFound, "removed while the job was running");
+            return Err(JobDirectory(gone)).with_context(|| "Workspace directory".into());
+        }
+        result
     }
 }
 impl Drop for Workspace {
@@ -56,7 +68,7 @@ impl Outputs {
             .create_new(true)
             .open(path)
             .map_err(JobDirectory)
-            .with_context(|| "Output directory".into())?;
+            .with_context(|| "Output file".into())?;
         self.paths.push(path.to_owned());
         Ok(f)
     }

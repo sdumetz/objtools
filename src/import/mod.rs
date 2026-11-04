@@ -19,7 +19,11 @@ use crate::shared::{
     references::References,
     Res,
 };
-use std::{fs, path::PathBuf};
+use std::{
+    fs,
+    io::{self, ErrorKind},
+    path::{Path, PathBuf},
+};
 #[derive(Default)]
 pub struct Options {
     pub input: PathBuf,
@@ -52,11 +56,11 @@ pub fn run(mut opts: Options) -> Res<()> {
         )
         .into());
     }
-    if opts.output.extension().and_then(|s| s.to_str()) != Some("gltf") {
-        return Err("Output must have a .gltf extension".into());
-    }
-    if opts.output.exists() || opts.output.with_extension("bin").exists() {
-        return Err("Output .gltf or .bin already exists; choose a new output path".into());
+    // Not `exists`, which follows a link and says no if it leads nowhere.
+    let taken = |path: &std::path::Path| fs::symlink_metadata(path).is_ok();
+    if taken(&opts.output) || taken(&opts.output.with_extension("bin")) {
+        let message = "Output .gltf or .bin already exists; choose a new output path";
+        return Err(JobDirectory(io::Error::new(ErrorKind::AlreadyExists, message)).into());
     }
     // With `--tmp-dir` elsewhere, a missing output directory would only show after the import.
     fs::metadata(parent(&opts.output))
@@ -65,14 +69,17 @@ pub fn run(mut opts: Options) -> Res<()> {
     let references = References::for_input(parent(&opts.input), opts.trusted)
         .with_context(|| "Input directory".into())?;
     let workspace = Workspace::create(&opts.tmp_dir, opts.keep_tmp)?;
-    if matches!(ext.as_str(), "gltf" | "glb") {
-        return from_gltf::convert(&opts, &workspace.path, references);
+    workspace.explain(convert(&opts, &ext, references, &workspace.path))
+}
+fn convert(opts: &Options, ext: &str, references: References, workspace: &Path) -> Res<()> {
+    if matches!(ext, "gltf" | "glb") {
+        return from_gltf::convert(opts, workspace, references);
     }
     let source = if ext == "obj" {
         opts.input.clone()
     } else {
-        let intermediate = workspace.path.join("source.obj");
-        vrml::convert(&opts.input, &intermediate, &workspace.path, opts.progress)?;
+        let intermediate = workspace.join("source.obj");
+        vrml::convert(&opts.input, &intermediate, workspace, opts.progress)?;
         intermediate
     };
     let origin = if ext == "obj" {
@@ -82,11 +89,11 @@ pub fn run(mut opts: Options) -> Res<()> {
     };
     let scene = obj::spool(
         &source,
-        &workspace.path,
+        workspace,
         opts.progress,
         &references,
         origin,
         !opts.no_color,
     )?;
-    gltf::write(scene, &workspace.path, &opts)
+    gltf::write(scene, workspace, opts)
 }

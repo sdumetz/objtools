@@ -102,7 +102,7 @@ Textures using `KHR_texture_basisu`, `EXT_texture_webp` or `EXT_texture_avif` ar
 
 ## Models from other people
 
-By default, `import` and `inspect` only follow a file reference in a model (a glTF buffer or image, an OBJ `mtllib`, an MTL `map_Kd`, a VRML `url`) to a regular file inside the input's folder. A model can't read anything else on the machine, and a reference that fails gets the same message whether the file is missing or forbidden. A texture that can't be reached fails the import, as a missing one does. The output doesn't refer outside its own folder either, so `--images keep` is an error if it would.
+By default, `import` and `inspect` only follow a file reference in a model (a glTF buffer or image, an OBJ `mtllib`, an MTL `map_Kd`, a VRML `url`) to a regular file inside the input's folder. A model can't read anything else on the machine, and a reference that fails gets the same message whether the file is missing or forbidden. A texture that can't be reached fails the import, as a missing one does. The output doesn't refer outside its own folder either, so `--images keep` is a command-line error (exit 2) if it would.
 
 A reference may use `..` as long as it stays inside the folder. URLs and symlinks leading out are refused. An absolute path, which old exporters often write where a relative one belongs, is only used to look for a file of that name beside the file containing the reference. `--trusted` turns this off for a model you know: references may then point anywhere, including through symlinks, the lookup by name is only used when the absolute path doesn't exist, and `--images keep` may refer to any folder.
 
@@ -113,9 +113,10 @@ Messages on stderr can be shown to whoever supplied the model. A file is shown b
 | Code | Meaning |
 | ---- | ------- |
 | 0 | Success |
-| 1 | The input or the command line was rejected |
+| 1 | The input was rejected |
+| 2 | The command line is wrong, including `--images keep` with an output folder that doesn't hold the input's images |
 | 3 | A resource limit was reached: the disk is full, or a quota or file-size limit |
-| 4 | Another problem with the machine, such as permissions or a missing output directory |
+| 4 | Another problem with the machine, such as permissions, a missing output directory or an output that already exists |
 | 101 | Internal error (a panic) |
 
 Codes 3 and 4 mean the file itself may be fine, and a retry elsewhere can succeed. Every failure exits through the same cleanup. A file-size limit (`ulimit -f`) only gives code 3 if SIGXFSZ is ignored, for instance with `trap '' XFSZ` before starting objtools: otherwise the signal kills the process and leaves its workspace and partial output behind.

@@ -1187,7 +1187,7 @@ fn exit_codes_separate_a_bad_file_from_a_bad_environment() {
     assert_eq!(run(&f, &["bad.obj", "-o", "out.gltf"]), Some(1));
     assert_eq!(run(&f, &["missing.obj", "-o", "out.gltf"]), Some(1));
     assert_eq!(run(&f, &["texture.obj", "-o", "out.gltf"]), Some(1));
-    assert_eq!(run(&f, &["good.obj", "--no-such-option"]), Some(1));
+    assert_eq!(run(&f, &["good.obj", "--no-such-option"]), Some(2));
     // A directory the caller chose isn't the file's fault, even though it is "not found" too.
     assert_eq!(run(&f, &["good.obj", "-o", "no/such/out.gltf"]), Some(4));
     assert_eq!(

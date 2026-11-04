@@ -8,8 +8,10 @@ use std::{
 /// The process exit code of each kind of failure. A panic exits with Rust's 101.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Class {
-    /// The input or the command line can't be used, and retrying won't change that.
+    /// The input can't be used, and retrying won't change that.
     Rejected = 1,
+    /// The command line is wrong, whatever the input, which is for its author to fix.
+    Usage = 2,
     /// The disk is full, or a quota or file-size limit was reached.
     Resource = 3,
     /// Anything else about the machine: permissions, I/O errors, the job's directories.
@@ -20,6 +22,9 @@ pub enum Class {
 pub fn classify(error: &(dyn Error + 'static)) -> Class {
     let mut current = Some(error);
     while let Some(e) = current {
+        if e.is::<Usage>() {
+            return Class::Usage;
+        }
         if let Some(JobDirectory(io)) = e.downcast_ref() {
             return match of_io(io) {
                 Class::Resource => Class::Resource,
@@ -69,6 +74,15 @@ fn of_kind(kind: ErrorKind) -> Class {
         _ => Class::Environment,
     }
 }
+/// A command line objtools can't run, as opposed to a file it can't use.
+#[derive(Debug)]
+pub struct Usage(pub super::Failure);
+impl fmt::Display for Usage {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+impl Error for Usage {}
 /// A failure on a directory the caller chose: never the input's fault, even if it is missing.
 #[derive(Debug)]
 pub struct JobDirectory(pub io::Error);
@@ -171,6 +185,12 @@ mod tests {
         assert_eq!(class_of(serde_json::Error::io(full())), Class::Resource);
         let eof = serde_json::from_slice::<serde_json::Value>(b"{").unwrap_err();
         assert_eq!(class_of(eof), Class::Rejected);
+    }
+    #[test]
+    fn a_command_line_is_not_the_input() {
+        let usage = Usage("Unknown option: --nope".into());
+        assert_eq!(usage.to_string(), "Unknown option: --nope");
+        assert_eq!(class_of(usage), Class::Usage);
     }
     #[test]
     fn a_job_directory_is_never_the_input() {

@@ -229,6 +229,38 @@ fn a_job_killed_midway_does_not_block_the_next_one() {
 }
 #[cfg(unix)]
 #[test]
+fn a_workspace_removed_under_a_job_is_the_environment() {
+    let f = Fixture::new();
+    write_face_bomb(&f, 4_000_000);
+    let job = Command::new(env!("CARGO_BIN_EXE_objtools"))
+        .args(["import", "in.obj", "-o", "out.gltf"])
+        .current_dir(&f.0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let start = Instant::now();
+    loop {
+        // A job adding files can make this fail, so it takes as many tries as it takes.
+        let workspaces = f
+            .entries()
+            .into_iter()
+            .filter(|e| e.starts_with("objtools-"));
+        let removed = workspaces.map(|name| fs::remove_dir_all(f.0.join(name)).is_ok());
+        if removed.collect::<Vec<_>>() == [true] {
+            break;
+        }
+        assert!(start.elapsed() < Duration::from_secs(60), "no workspace");
+        thread::sleep(Duration::from_millis(1));
+    }
+    let out = job.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(4), "{stderr}");
+    assert!(stderr.contains("Workspace directory: "), "{stderr}");
+}
+#[cfg(unix)]
+#[test]
 fn a_leftover_with_this_process_id_does_not_block_the_job() {
     // Process IDs repeat in every container, so a killed job's leftover can have the next one's.
     // `exec` keeps the shell's ID, which is how the test knows it in advance.
@@ -322,7 +354,7 @@ impl Upload {
         let stderr = String::from_utf8_lossy(&out.stderr);
         // Not a panic, and not killed by a signal.
         assert!(
-            matches!(out.status.code(), Some(0 | 1 | 3 | 4)),
+            matches!(out.status.code(), Some(0..=4)),
             "{args:?}: {:?}: {stderr}",
             out.status
         );
@@ -1117,13 +1149,30 @@ fn a_link_planted_at_an_output_name_is_not_written_through() {
         // Copied, so that the texture has a name to write to.
         let out = u.run(&["import", "in.obj", "-o", "out.gltf", "--images", "copy"]);
         let stderr = String::from_utf8_lossy(&out.stderr);
-        // Seen before starting if it leads somewhere, and when writing if it doesn't.
-        assert!(
-            matches!(out.status.code(), Some(1 | 4)),
+        assert_eq!(
+            out.status.code(),
+            Some(4),
             "{planted} to {leads_to}: {stderr}"
         );
         assert_eq!(fs::read(outside.join("secret.bin")).unwrap(), before);
     }
+}
+#[test]
+fn an_output_that_already_exists_is_the_environment() {
+    let u = Upload::new();
+    u.write("m.obj", TRIANGLE);
+    for taken in ["taken.gltf", "taken.bin"] {
+        u.write(taken, "");
+        let out = u.run(&["import", "m.obj", "-o", "taken.gltf"]);
+        assert_eq!(out.status.code(), Some(4), "{taken}");
+        fs::remove_file(u.job().join(taken)).unwrap();
+    }
+}
+#[test]
+fn a_missing_input_reads_the_same_from_both_commands() {
+    let u = Upload::new();
+    let stderr = u.stderr_of(&["inspect", "none.obj"]);
+    assert_eq!(stderr, "Error: none.obj: not found\n");
 }
 #[test]
 fn inspecting_an_obj_reads_its_own_intermediate_back() {
@@ -1253,8 +1302,10 @@ fn keeping_images_never_writes_a_reference_outside_the_output_folder() {
         uv_buffer(&u);
         u.write("in.gltf", &gltf_with_image("t.png"));
         let target = "elsewhere/out.gltf";
-        let keep = ["import", input, "-o", target, "--images", "keep"];
-        let stderr = u.stderr_of(&keep);
+        // Where the host put the output, not what the file holds, so it's a command-line error.
+        let out = u.run(&["import", input, "-o", target, "--images", "keep"]);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{stderr}");
         assert!(stderr.contains("--images keep"), "{stderr}");
         assert!(!u.job().join(target).exists());
         // Copied by default, so what's published stands alone.
@@ -1470,7 +1521,7 @@ fn no_parser_lets_text_from_the_file_reach_a_message_as_it_is() {
     }
 }
 #[test]
-fn arguments_are_cleaned_too() {
+fn a_wrong_command_line_exits_2_and_is_cleaned_too() {
     let u = Upload::new();
     u.write("m.obj", TRIANGLE);
     let option = format!("--{HOSTILE}");
@@ -1479,10 +1530,30 @@ fn arguments_are_cleaned_too() {
         &["import", &option],
         &["inspect", &option],
         &["import", "m.obj", "-o", "out.gltf", &option],
+        &["import", "m.obj", HOSTILE],
     ] {
-        let stderr = u.stderr_of(args);
+        let out = u.run(args);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {stderr}");
         assert!(stderr.contains(CLEANED), "{args:?}: {stderr}");
     }
+    for args in [
+        ["import"].as_slice(),
+        &["inspect"],
+        &["import", "m.obj", "-o"],
+        &["import", "m.obj", "-o", "out.txt"],
+        &["import", "m.obj", "--images", "nope"],
+        &["import", "m.obj", "--image-quality", "nope"],
+        &["import", "m.obj", "--image-quality", "0"],
+    ] {
+        let out = u.run(args);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {stderr}");
+    }
+}
+#[test]
+fn an_input_of_an_unknown_kind_is_rejected_and_cleaned() {
+    let u = Upload::new();
     let extension = format!("m.{HOSTILE}");
     for command in ["import", "inspect"] {
         let stderr = u.stderr_of(&[command, &extension]);
