@@ -29,6 +29,20 @@ pub fn line(text: &str) {
     #[cfg(not(test))]
     let _ = io::stderr().write_all(line.as_bytes());
 }
+/// Rust's own panic report goes straight to stderr, and its message can quote the file. This one
+/// goes through [`line`], with the backtrace when `RUST_BACKTRACE` asks for one.
+pub fn report_panics() {
+    std::panic::set_hook(Box::new(|info| {
+        line(&format!(
+            "Error: internal error: {}",
+            info.to_string().replace('\n', " ")
+        ));
+        let backtrace = std::backtrace::Backtrace::capture();
+        if backtrace.status() == std::backtrace::BacktraceStatus::Captured {
+            backtrace.to_string().lines().for_each(line);
+        }
+    }));
+}
 /// Text from a file, for use inside a message: names, keywords and references. Cleaned like any
 /// message, and cut so that a message stays short whatever the file says.
 pub fn safe(text: &str) -> String {

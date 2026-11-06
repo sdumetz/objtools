@@ -7,6 +7,7 @@ mod shared;
 use shared::{failure, Res};
 use std::{env, process::ExitCode};
 fn main() -> ExitCode {
+    shared::diagnostics::report_panics();
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
