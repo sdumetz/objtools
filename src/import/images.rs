@@ -423,9 +423,7 @@ fn convert_image(
 }
 /// The source paths of textures with any pixel below full opacity, scanned on a background
 /// thread: inflating a large PNG takes seconds, and only the material JSON needs the answer.
-pub fn scan_transparency(
-    plans: &HashMap<PathBuf, Plan>,
-) -> JoinHandle<Result<HashSet<PathBuf>, String>> {
+pub fn scan_transparency(plans: &HashMap<PathBuf, Plan>) -> JoinHandle<Res<HashSet<PathBuf>>> {
     let jobs: Vec<_> = plans
         .iter()
         .filter(|(_, plan)| plan.scan)
@@ -434,12 +432,8 @@ pub fn scan_transparency(
     thread::spawn(move || {
         let mut transparent = HashSet::new();
         for (source, content) in jobs {
-            if texture_alpha(&content).map_err(|e| {
-                format!(
-                    "Texture {}: {e}",
-                    crate::shared::diagnostics::shown(&source)
-                )
-            })? {
+            let alpha = texture_alpha(&content);
+            if alpha.with_context(|| format!("Texture {}", shown(&source)))? {
                 transparent.insert(source);
             }
         }
@@ -499,6 +493,25 @@ fn texture_alpha(path: &Path) -> Res<bool> {
 mod tests {
     use super::*;
     use png::{BitDepth, ColorType};
+    #[test]
+    fn the_transparency_scan_keeps_the_cause_of_a_failure() {
+        let missing = PathBuf::from("no/such/texture.png");
+        let plan = Plan {
+            content: missing.clone(),
+            publish_name: None,
+            uri: String::new(),
+            mime: None,
+            scan: true,
+        };
+        let plans = HashMap::from([(missing, plan)]);
+        let error = scan_transparency(&plans).join().unwrap().unwrap_err();
+        let cause = std::error::Error::source(&*error).unwrap();
+        assert!(cause.is::<std::io::Error>(), "{error}");
+        assert!(
+            error.to_string().starts_with("Texture texture.png: "),
+            "{error}"
+        );
+    }
     fn encode(
         dir: &Path,
         name: &str,

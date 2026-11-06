@@ -81,7 +81,7 @@ impl Error for JobDirectory {}
 #[derive(Debug)]
 struct Labelled {
     label: String,
-    cause: Box<dyn Error>,
+    cause: super::Failure,
 }
 impl fmt::Display for Labelled {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -97,7 +97,7 @@ impl Error for Labelled {
 pub trait Context<T> {
     fn with_context(self, label: impl FnOnce() -> String) -> Res<T>;
 }
-impl<T, E: Into<Box<dyn Error>>> Context<T> for Result<T, E> {
+impl<T, E: Into<super::Failure>> Context<T> for Result<T, E> {
     fn with_context(self, label: impl FnOnce() -> String) -> Res<T> {
         self.map_err(|cause| {
             Labelled {
@@ -111,10 +111,10 @@ impl<T, E: Into<Box<dyn Error>>> Context<T> for Result<T, E> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn class_of(error: impl Into<Box<dyn Error>>) -> Class {
+    fn class_of(error: impl Into<crate::shared::Failure>) -> Class {
         classify(&*error.into())
     }
-    fn labelled(error: io::Error) -> Box<dyn Error> {
+    fn labelled(error: io::Error) -> crate::shared::Failure {
         let inner = Err::<(), _>(error).with_context(|| "inner".into());
         inner.with_context(|| "outer".into()).unwrap_err()
     }

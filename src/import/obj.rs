@@ -146,7 +146,10 @@ pub fn spool(
     let mut library_warnings = material::Warnings::new();
     let mut short_faces = 0u64;
     let mut record = Vec::new();
-    let mut reader = BufReader::with_capacity(256 * 1024, File::open(source)?);
+    let mut reader = BufReader::with_capacity(
+        256 * 1024,
+        File::open(source).with_context(|| shown(source))?,
+    );
     let mut line = String::new();
     // A statement continued over several lines, and the line it started on.
     let mut joined = String::new();

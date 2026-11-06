@@ -14,7 +14,7 @@ pub const SCALE: i128 = 10_000_000_000;
 
 /// Parse decimal and scientific notation exactly, rounding to 10 fractional digits.
 /// Subtraction stays in integers until local coordinates are encoded as float32.
-pub fn parse_decimal_fixed(s: &str) -> Result<i64, Box<dyn std::error::Error>> {
+pub fn parse_decimal_fixed(s: &str) -> crate::shared::Res<i64> {
     let s = s.trim();
     let invalid = || {
         format!(
@@ -91,7 +91,7 @@ pub fn parse_decimal_fixed(s: &str) -> Result<i64, Box<dyn std::error::Error>> {
 }
 
 /// Parse three whitespace-separated decimals into fixed-point.
-pub fn parse_three_fixed(s: &str) -> Result<[i64; 3], Box<dyn std::error::Error>> {
+pub fn parse_three_fixed(s: &str) -> crate::shared::Res<[i64; 3]> {
     let mut it = s.split_whitespace();
     let x = it.next().ok_or("missing x")?;
     let y = it.next().ok_or("missing y")?;

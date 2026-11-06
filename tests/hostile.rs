@@ -172,7 +172,8 @@ fn a_directory_the_process_cannot_write_is_the_environment() {
         .current_dir(&f.0)
         .output()
         .unwrap();
-    assert_eq!(out.status.code(), Some(4));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(4), "{stderr}");
 }
 
 /// A model in `job`, and in `outside` the files a hostile one would like to reach.
@@ -681,6 +682,7 @@ fn assert_no_machine_path(u: &Upload, args: &[&str]) {
     let parent = job.parent().unwrap().to_string_lossy();
     assert!(!stderr.contains(&*parent), "{args:?}: {stderr}");
     assert!(!stderr.contains("objtools-"), "{args:?}: {stderr}");
+    assert!(!stderr.contains(" Os {"), "{args:?}: {stderr}");
 }
 #[test]
 fn no_message_shows_where_the_job_runs() {
@@ -800,4 +802,13 @@ fn warnings_found_before_a_failure_still_show() {
         .find("unsupported OBJ records omitted: 1")
         .expect(&stderr);
     assert!(warning < stderr.find("Error: ").expect(&stderr), "{stderr}");
+}
+#[test]
+fn a_missing_input_is_named() {
+    let u = Upload::new();
+    for name in ["none.obj", "none.wrl", "none.gltf"] {
+        let stderr = u.stderr_of(&["import", name, "-o", "out.gltf"]);
+        assert!(stderr.starts_with(&format!("Error: {name}: ")), "{stderr}");
+        assert_eq!(stderr.lines().count(), 1, "{stderr}");
+    }
 }
