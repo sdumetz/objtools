@@ -12,8 +12,18 @@ mod smooth;
 mod triangulate;
 mod vrml;
 
-use crate::shared::{disk::Workspace, Res};
-use std::path::PathBuf;
+use self::material::Origin;
+use crate::shared::{
+    disk::{parent, Workspace},
+    failure::{Context, JobDirectory},
+    references::References,
+    Res,
+};
+use std::{
+    fs,
+    io::{self, ErrorKind},
+    path::{Path, PathBuf},
+};
 #[derive(Default)]
 pub struct Options {
     pub input: PathBuf,
@@ -28,8 +38,11 @@ pub struct Options {
     pub quiet: bool,
     /// Drop OBJ vertex colours instead of writing `COLOR_0`/`_COLOR`.
     pub no_color: bool,
+    /// Follow file references anywhere, rather than only inside the input's directory.
+    pub trusted: bool,
 }
-pub fn run(opts: Options) -> Res<()> {
+pub fn run(mut opts: Options) -> Res<()> {
+    opts.images.outside_references = opts.trusted;
     let ext = opts
         .input
         .extension()
@@ -37,39 +50,50 @@ pub fn run(opts: Options) -> Res<()> {
         .unwrap_or("")
         .to_ascii_lowercase();
     if !matches!(ext.as_str(), "obj" | "wrl" | "vrml" | "gltf" | "glb") {
-        return Err(format!("Unsupported input format: .{ext}").into());
+        return Err(format!(
+            "Unsupported input format: .{}",
+            crate::shared::diagnostics::safe(&ext)
+        )
+        .into());
     }
-    if opts.output.extension().and_then(|s| s.to_str()) != Some("gltf") {
-        return Err("Output must have a .gltf extension".into());
+    // Not `exists`, which follows a link and says no if it leads nowhere.
+    let taken = |path: &std::path::Path| fs::symlink_metadata(path).is_ok();
+    if taken(&opts.output) || taken(&opts.output.with_extension("bin")) {
+        let message = "Output .gltf or .bin already exists; choose a new output path";
+        return Err(JobDirectory(io::Error::new(ErrorKind::AlreadyExists, message)).into());
     }
-    if opts.output.exists() || opts.output.with_extension("bin").exists() {
-        return Err("Output .gltf or .bin already exists; choose a new output path".into());
-    }
+    // With `--tmp-dir` elsewhere, a missing output directory would only show after the import.
+    fs::metadata(parent(&opts.output))
+        .map_err(JobDirectory)
+        .with_context(|| "Output directory".into())?;
+    let references = References::for_input(parent(&opts.input), opts.trusted)
+        .with_context(|| "Input directory".into())?;
     let workspace = Workspace::create(&opts.tmp_dir, opts.keep_tmp)?;
-    if matches!(ext.as_str(), "gltf" | "glb") {
-        return from_gltf::convert(&opts, &workspace.path);
+    workspace.explain(convert(&opts, &ext, references, &workspace.path))
+}
+fn convert(opts: &Options, ext: &str, references: References, workspace: &Path) -> Res<()> {
+    if matches!(ext, "gltf" | "glb") {
+        return from_gltf::convert(opts, workspace, references);
     }
     let source = if ext == "obj" {
         opts.input.clone()
     } else {
-        let intermediate = workspace.path.join("source.obj");
-        vrml::convert(&opts.input, &intermediate, &workspace.path, opts.progress)?;
+        let intermediate = workspace.join("source.obj");
+        vrml::convert(&opts.input, &intermediate, workspace, opts.progress)?;
         intermediate
     };
-    let texture_base = opts
-        .input
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."));
+    let origin = if ext == "obj" {
+        Origin::Model
+    } else {
+        Origin::GeneratedFrom(&opts.input)
+    };
     let scene = obj::spool(
         &source,
-        &workspace.path,
+        workspace,
         opts.progress,
-        if ext == "obj" {
-            None
-        } else {
-            Some(texture_base)
-        },
+        &references,
+        origin,
         !opts.no_color,
     )?;
-    gltf::write(scene, &workspace.path, &opts)
+    gltf::write(scene, workspace, opts)
 }

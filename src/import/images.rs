@@ -1,6 +1,12 @@
 //! Source image policy and optional decoding/encoding, one image at a time.
 use super::material::Material;
-use crate::shared::{disk::parent, gltf::uri, Res};
+use crate::shared::{
+    diagnostics::{shown, Tally},
+    disk::parent,
+    failure::{Context, Usage},
+    gltf::uri,
+    Res,
+};
 use std::{
     collections::{HashMap, HashSet},
     fs::{self, File},
@@ -54,6 +60,9 @@ pub struct Options {
     pub convert: Option<bool>,
     pub format: Format,
     pub quality: u8,
+    /// Let the output refer to images outside its own folder: `import::run` sets this from
+    /// `--trusted`. `Mode::Reference` never gets as far as asking.
+    pub outside_references: bool,
 }
 impl Default for Options {
     fn default() -> Self {
@@ -62,6 +71,7 @@ impl Default for Options {
             convert: None,
             format: Format::Jpg,
             quality: 95,
+            outside_references: false,
         }
     }
 }
@@ -151,13 +161,14 @@ pub fn prepare_gltf_image(
     input: &Path,
     output: &Path,
     workspace: &Path,
+    composited: &mut Tally,
 ) -> Res<Plan> {
-    let label = |e: &dyn std::fmt::Display| format!("Texture {}: {e}", image.path.display());
+    let label = || format!("Texture {}", shown(image.path));
     let mut header = [0; 64];
-    let mut file = File::open(image.path).map_err(|e| label(&e))?;
+    let mut file = File::open(image.path).with_context(label)?;
     let mut read = 0;
     while read < header.len() {
-        match file.read(&mut header[read..]).map_err(|e| label(&e))? {
+        match file.read(&mut header[read..]).with_context(label)? {
             0 => break,
             n => read += n,
         }
@@ -170,14 +181,16 @@ pub fn prepare_gltf_image(
     };
     let convert = options.convert.unwrap_or(!valid);
     if !valid && !convert {
-        return Err(label(
-            &"unsupported glTF image format with --convert-images=false; enable conversion",
+        return Err(format!(
+            "{}: unsupported glTF image format with --convert-images=false; enable conversion",
+            label()
         )
         .into());
     }
     if convert && matches!(kind, Kind::Avif | Kind::Ktx2) {
-        return Err(label(
-            &"AVIF and KTX2 images can't be converted: this build has no decoder for them",
+        return Err(format!(
+            "{}: AVIF and KTX2 images can't be converted: this build has no decoder for them",
+            label()
         )
         .into());
     }
@@ -200,8 +213,8 @@ pub fn prepare_gltf_image(
     let name = format!("{stem}_texture_{number}.{extension}");
     let content = if convert {
         let converted = workspace.join(&name);
-        convert_image(image.path, &converted, options)
-            .map_err(|e| label(&format!("converting: {e}")))?;
+        convert_image(image.path, &converted, options, composited)
+            .with_context(|| format!("{}: converting", label()))?;
         converted
     } else {
         image.path.to_owned()
@@ -211,13 +224,14 @@ pub fn prepare_gltf_image(
     } else {
         kind
     };
-    check_gltf_image(&content, checked).map_err(|e| label(&e))?;
+    check_gltf_image(&content, checked).with_context(label)?;
     let uri = if copy {
         uri(&name)
     } else {
-        relative_uri(
+        kept_uri(
             &fs::canonicalize(image.path)?,
             &fs::canonicalize(parent(output))?,
+            options,
         )?
     };
     Ok(Plan {
@@ -277,6 +291,17 @@ fn relative_uri(source: &Path, destination: &Path) -> Res<String> {
     }
     Ok(parts.join("/"))
 }
+/// The URI of an image left where it is. A published model doesn't refer outside its own folder
+/// unless the user vouches for it, and `--images auto` copies rather than getting here.
+fn kept_uri(source: &Path, destination: &Path, options: &Options) -> Res<String> {
+    if !options.outside_references && !source.starts_with(destination) {
+        // Confined images are all beneath the input's folder, so this needs an output folder that
+        // doesn't hold the input's: the command line's doing, not the file's.
+        let message = "--images keep would refer outside the output's folder; use --images copy, or --trusted to allow it";
+        return Err(Usage(message.into()).into());
+    }
+    relative_uri(source, destination)
+}
 pub fn prepare(
     options: &Options,
     input: &Path,
@@ -291,12 +316,12 @@ pub fn prepare(
         .ok_or("Invalid output filename")?
         .to_string_lossy();
     let mut plans = HashMap::new();
+    let mut composited = composited_tally();
     for material in materials {
         let Some(path) = &material.texture else {
             continue;
         };
-        let source =
-            fs::canonicalize(path).map_err(|e| format!("Texture {}: {e}", path.display()))?;
+        let source = fs::canonicalize(path).with_context(|| format!("Texture {}", shown(path)))?;
         if plans.contains_key(&source) {
             continue;
         }
@@ -319,7 +344,7 @@ pub fn prepare(
         let supported = matches!(ext.as_str(), "jpg" | "jpeg" | "png");
         let convert = options.convert.unwrap_or(!supported);
         if !supported && !convert {
-            return Err(format!("Texture {} has unsupported glTF image format .{ext} with --convert-images=false; enable conversion", source.display()).into());
+            return Err(format!("Texture {} has unsupported glTF image format .{} with --convert-images=false; enable conversion", shown(&source), crate::shared::diagnostics::safe(&ext)).into());
         }
         let copy = convert
             || match options.mode {
@@ -335,17 +360,17 @@ pub fn prepare(
         let name = format!("{stem}_texture_{}.{output_ext}", plans.len());
         let content = if convert {
             let converted = workspace.join(&name);
-            convert_image(&source, &converted, options)
-                .map_err(|e| format!("Converting texture {}: {e}", source.display()))?;
+            convert_image(&source, &converted, options, &mut composited)
+                .with_context(|| format!("Converting texture {}", shown(&source)))?;
             converted
         } else {
             source.clone()
         };
-        check_image(&content).map_err(|e| format!("Texture {}: {e}", source.display()))?;
+        check_image(&content).with_context(|| format!("Texture {}", shown(&source)))?;
         let uri = if copy {
             uri(&name)
         } else {
-            relative_uri(&source, &destination)?
+            kept_uri(&source, &destination, options)?
         };
         plans.insert(
             source,
@@ -360,7 +385,16 @@ pub fn prepare(
     }
     Ok(plans)
 }
-fn convert_image(source: &Path, destination: &Path, options: &Options) -> Res<()> {
+/// One warning for all the textures of a model, however many it has.
+pub fn composited_tally() -> Tally {
+    Tally::new("textures converted to JPG with transparency composited onto white (--image-format png preserves alpha)")
+}
+fn convert_image(
+    source: &Path,
+    destination: &Path,
+    options: &Options,
+    composited: &mut Tally,
+) -> Res<()> {
     let decoded = image::ImageReader::open(source)?
         .with_guessed_format()?
         .decode()?;
@@ -371,7 +405,7 @@ fn convert_image(source: &Path, destination: &Path, options: &Options) -> Res<()
             let rgb = if decoded.has_alpha() {
                 let mut rgba = decoded.to_rgba8();
                 if rgba.pixels().any(|p| p[3] != 255) {
-                    eprintln!("Warning: converting {} to JPG composites transparency onto white; use --image-format png to preserve alpha", source.display());
+                    composited.add(&shown(source));
                 }
                 for p in rgba.pixels_mut() {
                     for i in 0..3 {
@@ -392,9 +426,7 @@ fn convert_image(source: &Path, destination: &Path, options: &Options) -> Res<()
 }
 /// The source paths of textures with any pixel below full opacity, scanned on a background
 /// thread: inflating a large PNG takes seconds, and only the material JSON needs the answer.
-pub fn scan_transparency(
-    plans: &HashMap<PathBuf, Plan>,
-) -> JoinHandle<Result<HashSet<PathBuf>, String>> {
+pub fn scan_transparency(plans: &HashMap<PathBuf, Plan>) -> JoinHandle<Res<HashSet<PathBuf>>> {
     let jobs: Vec<_> = plans
         .iter()
         .filter(|(_, plan)| plan.scan)
@@ -403,7 +435,8 @@ pub fn scan_transparency(
     thread::spawn(move || {
         let mut transparent = HashSet::new();
         for (source, content) in jobs {
-            if texture_alpha(&content).map_err(|e| format!("Texture {}: {e}", source.display()))? {
+            let alpha = texture_alpha(&content);
+            if alpha.with_context(|| format!("Texture {}", shown(&source)))? {
                 transparent.insert(source);
             }
         }
@@ -463,6 +496,25 @@ fn texture_alpha(path: &Path) -> Res<bool> {
 mod tests {
     use super::*;
     use png::{BitDepth, ColorType};
+    #[test]
+    fn the_transparency_scan_keeps_the_cause_of_a_failure() {
+        let missing = PathBuf::from("no/such/texture.png");
+        let plan = Plan {
+            content: missing.clone(),
+            publish_name: None,
+            uri: String::new(),
+            mime: None,
+            scan: true,
+        };
+        let plans = HashMap::from([(missing, plan)]);
+        let error = scan_transparency(&plans).join().unwrap().unwrap_err();
+        let cause = std::error::Error::source(&*error).unwrap();
+        assert!(cause.is::<std::io::Error>(), "{error}");
+        assert!(
+            error.to_string().starts_with("Texture texture.png: "),
+            "{error}"
+        );
+    }
     fn encode(
         dir: &Path,
         name: &str,

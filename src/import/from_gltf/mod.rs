@@ -51,6 +51,7 @@ use super::{gltf::COORDINATE_CONVENTION, Options};
 use crate::shared::{
     disk::{parent, Outputs},
     gltf::{uri, Gltf},
+    references::References,
     Res,
 };
 use payload::{Patches, Payload};
@@ -96,9 +97,9 @@ fn names(root: &Value, key: &str) -> BTreeSet<String> {
     let list = root[key].as_array().into_iter().flatten();
     list.filter_map(Value::as_str).map(str::to_owned).collect()
 }
-pub fn convert(opts: &Options, workspace: &std::path::Path) -> Res<()> {
+pub fn convert(opts: &Options, workspace: &std::path::Path, references: References) -> Res<()> {
     // Opening verifies that every required extension is supported.
-    let mut gltf = Gltf::open(&opts.input, workspace)?;
+    let mut gltf = Gltf::open(&opts.input, workspace, references)?;
     let declared = names(&gltf.root, "extensionsUsed");
     let required = names(&gltf.root, "extensionsRequired");
     verify::compressed_primitives_have_data(&gltf.root)?;
@@ -215,9 +216,9 @@ pub fn convert(opts: &Options, workspace: &std::path::Path) -> Res<()> {
     drop(dst);
     outputs.commit();
     if !opts.quiet {
-        eprintln!(
+        crate::say!(
             "Wrote {} ({} faces, {mesh_count} meshes, {} bytes of geometry)",
-            opts.output.display(),
+            crate::shared::diagnostics::shown(&opts.output),
             geometry.faces,
             output.length
         );

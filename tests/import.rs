@@ -616,7 +616,11 @@ fn image_defaults_keep_in_same_folder_and_copy_in_different_folder() {
         fs::read(f.0.join("source.png")).unwrap(),
         fs::read(f.0.join("destination/out_texture_0.png")).unwrap()
     );
-    let result = import_images(&f, "destination/keep.gltf", &["--images", "keep"]);
+    let result = import_images(
+        &f,
+        "destination/keep.gltf",
+        &["--images", "keep", "--trusted"],
+    );
     assert!(
         result.status.success(),
         "{}",
@@ -710,7 +714,7 @@ fn png_conversion_preserves_alpha_and_jpg_composites_white() {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    assert!(String::from_utf8_lossy(&result.stderr).contains("composites transparency onto white"));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("transparency composited onto white"));
     assert!(image::open(f.0.join("jpg_texture_0.jpg"))
         .unwrap()
         .to_rgb8()
@@ -894,8 +898,10 @@ fn map_kd_options_become_texture_transform_and_clamp() {
     let result = f.import("in.obj", false);
     let stderr = String::from_utf8_lossy(&result.stderr);
     assert!(result.status.success(), "{stderr}");
-    assert!(stderr.contains("map_Kd -mm is ignored"), "{stderr}");
-    assert!(stderr.contains("map_Kd -t is ignored"), "{stderr}");
+    assert!(
+        stderr.contains("unsupported map_Kd options ignored: 2, for example -mm, -t"),
+        "{stderr}"
+    );
     let (root, _) = f.result();
     // One image, sampled by two textures: repeat for `plain`, clamp for `tiled`.
     assert_eq!(root["images"].as_array().unwrap().len(), 1);
@@ -954,12 +960,12 @@ fn fully_transparent_materials_warn_once_unless_glass() {
     let stderr = String::from_utf8_lossy(&result.stderr);
     assert!(result.status.success(), "{stderr}");
     assert_eq!(
-        stderr.matches("is fully transparent").count(),
+        stderr.matches("fully transparent materials").count(),
         1,
         "{stderr}"
     );
     assert!(
-        stderr.contains("material ghost is fully transparent"),
+        stderr.contains("fully transparent materials") && stderr.contains("for example ghost"),
         "{stderr}"
     );
     // The output stays literal.
@@ -986,10 +992,13 @@ fn keywords_match_whatever_their_case() {
     assert!(result.status.success(), "{stderr}");
     // Unsupported keywords are still reported as written.
     assert!(
-        stderr.contains("unsupported MTL property MAP_KS"),
+        stderr.contains("unsupported MTL properties ignored: 1, for example MAP_KS"),
         "{stderr}"
     );
-    assert!(stderr.contains("unsupported OBJ record CSTYPE"), "{stderr}");
+    assert!(
+        stderr.contains("unsupported OBJ records omitted: 1, for example CSTYPE"),
+        "{stderr}"
+    );
     let (root, _) = f.result();
     assert_eq!(root["meshes"][0]["name"], "Thing");
     let material = &root["materials"][0];
@@ -1152,4 +1161,44 @@ fn unportable_vertex_components_warn_instead_of_failing() {
     assert_eq!(colors[2], vec![1., 1., 1.]);
     assert_eq!(colors[3][0], 0.);
     assert_eq!(colors[3][2], 1.);
+}
+#[test]
+fn exit_codes_separate_a_bad_file_from_a_bad_environment() {
+    let triangle = "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
+    let run = |f: &Fixture, args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_objtools"))
+            .arg("import")
+            .args(args)
+            .current_dir(&f.0)
+            .output()
+            .unwrap()
+            .status
+            .code()
+    };
+    let f = Fixture::new();
+    f.file("good.obj", triangle);
+    f.file("bad.obj", "v 0 0 oops\n");
+    f.file(
+        "texture.obj",
+        &format!("mtllib texture.mtl\nvt 0 0\nusemtl m\n{triangle}"),
+    );
+    f.file("texture.mtl", "newmtl m\nmap_Kd missing.png\n");
+    assert_eq!(run(&f, &["good.obj", "-o", "ok.gltf"]), Some(0));
+    assert_eq!(run(&f, &["bad.obj", "-o", "out.gltf"]), Some(1));
+    assert_eq!(run(&f, &["missing.obj", "-o", "out.gltf"]), Some(1));
+    assert_eq!(run(&f, &["texture.obj", "-o", "out.gltf"]), Some(1));
+    assert_eq!(run(&f, &["good.obj", "--no-such-option"]), Some(2));
+    // A directory the caller chose isn't the file's fault, even though it is "not found" too.
+    assert_eq!(run(&f, &["good.obj", "-o", "no/such/out.gltf"]), Some(4));
+    assert_eq!(
+        run(&f, &["good.obj", "-o", "out.gltf", "--tmp-dir", "no/such"]),
+        Some(4)
+    );
+    assert_eq!(
+        run(
+            &f,
+            &["good.obj", "-o", "no/such/out.gltf", "--tmp-dir", "."]
+        ),
+        Some(4)
+    );
 }

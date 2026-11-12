@@ -1,10 +1,22 @@
+#![deny(clippy::print_stderr)]
+
 mod import;
 mod inspect;
 mod shared;
 
-use shared::Res;
-use std::env;
-fn main() -> Res<()> {
+use shared::{failure, Res};
+use std::{env, process::ExitCode};
+fn main() -> ExitCode {
+    shared::diagnostics::report_panics();
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            crate::say!("Error: {e}");
+            ExitCode::from(failure::classify(&*e) as u8)
+        }
+    }
+}
+fn run() -> Res<()> {
     let mut args = env::args().skip(1);
     match args.next().as_deref() {
         None | Some("--help" | "-h") => {
@@ -14,7 +26,8 @@ fn main() -> Res<()> {
         Some("import") => import::cli::run(args),
         Some("inspect") => inspect::cli::run(args),
         Some(other) => {
-            Err(format!("Unknown command {other}. Run objtools --help for usage.").into())
+            let message = format!("Unknown command {other}. Run objtools --help for usage.");
+            Err(failure::Usage(message.into()).into())
         }
     }
 }

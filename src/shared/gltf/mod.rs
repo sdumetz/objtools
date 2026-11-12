@@ -7,6 +7,8 @@ pub mod matrix;
 
 use super::{
     disk::{map, parent},
+    failure::Context,
+    references::References,
     Res,
 };
 pub use accessor::Accessor;
@@ -23,6 +25,7 @@ const GLB_BIN: usize = 0x004e_4942;
 pub struct Gltf {
     pub root: Value,
     base: PathBuf,
+    references: References,
     buffers: Vec<(Mmap, Range<usize>)>,
     /// Images that were `data:` URIs, by image index.
     embedded: BTreeMap<usize, Mmap>,
@@ -63,7 +66,7 @@ pub fn uri(name: &str) -> String {
     out
 }
 /// Undo URI path escaping; `uri` writes `%XX` for every byte outside the unreserved set.
-fn decode_uri(uri: &str) -> Res<PathBuf> {
+fn decode_uri(uri: &str) -> Res<String> {
     let bytes = uri.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -77,7 +80,7 @@ fn decode_uri(uri: &str) -> Res<PathBuf> {
             i += 1;
         }
     }
-    Ok(PathBuf::from(String::from_utf8(out)?))
+    Ok(String::from_utf8(out)?)
 }
 /// The byte ranges of a GLB's JSON and BIN chunks. Unknown chunks are skipped, as the spec asks.
 fn glb_chunks(file: &[u8]) -> Res<(Range<usize>, Option<Range<usize>>)> {
@@ -113,15 +116,15 @@ impl Gltf {
     /// A GLB is recognized by its content rather than its file extension, as in three.js's
     /// `GLTFLoader`. Extensions are checked first, so a file needing an unsupported one reports
     /// that rather than a symptom such as a buffer without data.
-    pub fn open(path: &Path, workspace: &Path) -> Res<Self> {
-        let in_file = |e| format!("{}: {e}", path.display());
-        let file = map(path).map_err(in_file)?;
+    pub fn open(path: &Path, workspace: &Path, references: References) -> Res<Self> {
+        let in_file = || crate::shared::diagnostics::shown(path);
+        let file = map(path).with_context(in_file)?;
         let (mut root, mut bin): (Value, _) = if file.starts_with(b"glTF") {
-            let (json, bin) = glb_chunks(&file).map_err(in_file)?;
-            let root = serde_json::from_slice(&file[json]).map_err(|e| in_file(e.into()))?;
+            let (json, bin) = glb_chunks(&file).with_context(in_file)?;
+            let root = serde_json::from_slice(&file[json]).with_context(in_file)?;
             (root, bin.map(|range| (file, range)))
         } else {
-            let root = serde_json::from_slice(&file).map_err(|e| in_file(e.into()))?;
+            let root = serde_json::from_slice(&file).with_context(in_file)?;
             (root, None)
         };
         extensions::check(&root)?;
@@ -133,15 +136,17 @@ impl Gltf {
             let (map, range) = match buffer["uri"].as_str() {
                 Some(uri) if uri.starts_with("data:") => {
                     let file = workspace.join(format!("buffer-{i}"));
-                    let map = data_uri::decode(uri, &file).map_err(|e| format!("{label}: {e}"))?;
+                    let map = data_uri::decode(uri, &file).with_context(|| label.clone())?;
                     let whole = 0..map.len();
                     buffer.as_object_mut().unwrap().remove("uri");
                     (map, whole)
                 }
                 Some(uri) => {
-                    let file = base.join(decode_uri(uri)?);
-                    label = file.display().to_string();
-                    let map = map(&file).map_err(|e| format!("{label}: {e}"))?;
+                    let file = references
+                        .resolve(&base, &decode_uri(uri)?)
+                        .with_context(|| format!("Buffer {i}"))?;
+                    label = crate::shared::diagnostics::shown(&file);
+                    let map = map(&file).with_context(|| label.clone())?;
                     let whole = 0..map.len();
                     (map, whole)
                 }
@@ -159,7 +164,7 @@ impl Gltf {
         for (i, image) in list.enumerate() {
             if let Some(uri) = image["uri"].as_str().filter(|u| u.starts_with("data:")) {
                 let file = workspace.join(format!("image-{i}"));
-                let map = data_uri::decode(uri, &file).map_err(|e| format!("Image {i}: {e}"))?;
+                let map = data_uri::decode(uri, &file).with_context(|| format!("Image {i}"))?;
                 embedded.insert(i, map);
                 image.as_object_mut().unwrap().remove("uri");
             }
@@ -167,6 +172,7 @@ impl Gltf {
         Ok(Self {
             root,
             base,
+            references,
             buffers,
             embedded,
         })
@@ -193,7 +199,8 @@ impl Gltf {
         }
         let image = element(&self.root, "images", id)?;
         if let Some(uri) = image["uri"].as_str() {
-            return Ok(Image::File(self.base.join(decode_uri(uri)?)));
+            let file = self.references.resolve(&self.base, &decode_uri(uri)?);
+            return Ok(Image::File(file.with_context(|| format!("Texture {id}"))?));
         }
         let (bytes, _) = self.view(index(&image["bufferView"], "bufferView")?)?;
         Ok(Image::Bytes(bytes))

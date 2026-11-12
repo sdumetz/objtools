@@ -5,8 +5,10 @@ use super::{
     report::{Report, TextureReport},
 };
 use crate::shared::{
+    failure::Context,
     format::fmt_count,
     gltf::{container_size, element, extensions, index, Accessor, Gltf, Image},
+    references::References,
     Res,
 };
 use serde_json::Value;
@@ -86,7 +88,7 @@ fn dimensions(gltf: &Gltf, id: usize, display_base: &Path) -> Res<(String, u32, 
                     .with_guessed_format()?
                     .into_dimensions()?)
             })()
-            .map_err(|e| format!("Texture {}: {e}", path.display()))?;
+            .with_context(|| format!("Texture {}", crate::shared::diagnostics::shown(&path)))?;
             let name = relative(&fs::canonicalize(&path)?, display_base);
             return Ok((name.display().to_string(), width, height));
         }
@@ -104,8 +106,14 @@ fn dimensions(gltf: &Gltf, id: usize, display_base: &Path) -> Res<(String, u32, 
 }
 /// Each mesh is counted once, however many nodes instance it, and a POSITION accessor shared
 /// by several primitives counts its vertices once.
-pub fn measure(path: &Path, display_base: &Path, workspace: &Path, progress: bool) -> Res<Report> {
-    let gltf = Gltf::open(path, workspace)?;
+pub fn measure(
+    path: &Path,
+    references: References,
+    display_base: &Path,
+    workspace: &Path,
+    progress: bool,
+) -> Res<Report> {
+    let gltf = Gltf::open(path, workspace, references)?;
     let root = &gltf.root;
     // Every image a material samples as its base colour, in image order.
     let mut textures = BTreeMap::new();
@@ -209,7 +217,7 @@ pub fn measure(path: &Path, display_base: &Path, workspace: &Path, progress: boo
             skipped += u64::from(!target.triangle(tri, wrap, filter)?);
             rasterized += 1;
             if progress && rasterized.is_multiple_of(10_000_000) {
-                eprintln!(
+                crate::say!(
                     "Inspecting: rasterized {} UV triangles",
                     fmt_count(rasterized)
                 );
@@ -217,7 +225,7 @@ pub fn measure(path: &Path, display_base: &Path, workspace: &Path, progress: boo
         }
     }
     if skipped > 0 {
-        eprintln!("Warning: {skipped} UV triangles repeating their texture more than 64 times were left out of occupancy");
+        crate::say!("Warning: {skipped} UV triangles repeating their texture more than 64 times were left out of occupancy");
     }
     let textures = textures
         .into_values()

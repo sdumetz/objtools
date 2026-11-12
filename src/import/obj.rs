@@ -3,9 +3,14 @@
 //! Spools are written sequentially, then memory-mapped for the random-access replay.
 use super::{
     fixed::{parse_three_fixed, BBox},
-    material::{self, Material},
+    material::{self, Material, Origin},
 };
-use crate::shared::Res;
+use crate::shared::{
+    diagnostics::{safe, shown, Tally},
+    failure::Context,
+    references::References,
+    Res,
+};
 use std::{
     collections::{HashMap, HashSet},
     fs::File,
@@ -81,10 +86,9 @@ fn floats(rest: &str, count: usize) -> Res<Vec<f64>> {
     }
     Ok(out)
 }
-fn warn_once(warned: &mut HashSet<String>, key: &str, message: &str) {
-    if !warned.contains(key) {
-        warned.insert(key.to_owned());
-        eprintln!("Warning: {message}");
+fn warn_once(warned: &mut HashSet<&'static str>, key: &'static str, message: &str) {
+    if warned.insert(key) {
+        crate::say!("Warning: {message}");
     }
 }
 /// OBJ vertex colours are display (sRGB) values; glTF `COLOR_0` is linear.
@@ -100,9 +104,20 @@ pub fn spool(
     source: &Path,
     dir: &Path,
     progress: bool,
-    texture_base: Option<&Path>,
+    references: &References,
+    origin: Origin,
     keep_colors: bool,
 ) -> Res<Scene> {
+    // A generated OBJ names its own MTL in the workspace, whereas its textures are the input's.
+    let libraries = match origin {
+        Origin::Model => references.clone(),
+        Origin::GeneratedFrom(_) => References::confined(dir)?,
+    };
+    // A line of a generated OBJ means nothing to whoever supplied the input.
+    let location = |line: usize| match origin {
+        Origin::Model => format!("{}:{line}", shown(source)),
+        Origin::GeneratedFrom(input) => shown(input),
+    };
     let mut attrs = [
         BufWriter::new(File::create(dir.join("v"))?),
         BufWriter::new(File::create(dir.join("vt"))?),
@@ -126,9 +141,15 @@ pub fn spool(
     let mut flat = false;
     let mut material = 0u32;
     let mut warned = HashSet::new();
+    let mut unsupported = Tally::new("unsupported OBJ records omitted");
+    let mut undefined = Tally::new("undefined materials, using the default");
+    let mut library_warnings = material::Warnings::new();
     let mut short_faces = 0u64;
     let mut record = Vec::new();
-    let mut reader = BufReader::with_capacity(256 * 1024, File::open(source)?);
+    let mut reader = BufReader::with_capacity(
+        256 * 1024,
+        File::open(source).with_context(|| shown(source))?,
+    );
     let mut line = String::new();
     // A statement continued over several lines, and the line it started on.
     let mut joined = String::new();
@@ -154,7 +175,7 @@ pub fn spool(
             line_no += 1;
         }
         if progress && bytes >= next_progress {
-            eprintln!(
+            crate::say!(
                 "Spooling OBJ: {}",
                 crate::shared::format::fmt_bytes(bytes as u64)
             );
@@ -172,8 +193,8 @@ pub fn spool(
             }
             if joined.len() + head.len() >= 1024 * 1024 {
                 return Err(format!(
-                    "{}:{start_line}: OBJ statement exceeds 1 MiB limit",
-                    source.display()
+                    "{}: OBJ statement exceeds 1 MiB limit",
+                    location(start_line)
                 )
                 .into());
             }
@@ -303,11 +324,23 @@ pub fn spool(
                 }
                 "mtllib" => {
                     let parent = source.parent().unwrap_or(Path::new("."));
-                    if parent.join(rest).is_file() {
-                        material::load(&parent.join(rest), texture_base, &mut definitions)?;
+                    let mut load = |file: &Path| {
+                        material::load(
+                            file,
+                            references,
+                            origin,
+                            &mut definitions,
+                            &mut library_warnings,
+                        )
+                    };
+                    // One file name with spaces in it, or several names.
+                    let whole = libraries.resolve(parent, rest).ok();
+                    if let Some(file) = whole.filter(|file| file.is_file()) {
+                        load(&file)?;
                     } else {
                         for name in rest.split_whitespace() {
-                            material::load(&parent.join(name), texture_base, &mut definitions)?;
+                            let file = libraries.resolve(parent, name);
+                            load(&file.with_context(|| format!("mtllib {}", safe(name)))?)?;
                         }
                     }
                 }
@@ -353,22 +386,18 @@ pub fn spool(
                 // number, or a bare `s`, smooths them together again.
                 "s" => flat = rest.eq_ignore_ascii_case("off") || rest.parse::<u64>() == Ok(0),
                 "" | "g" => {}
-                _ => {
-                    if warned.insert(key.to_owned()) {
-                        eprintln!("Warning: unsupported OBJ record {written} is omitted");
-                    }
-                }
+                _ => unsupported.add(written),
             }
             Ok(())
         })();
-        result.map_err(|e| format!("{}:{start_line}: {e}", source.display()))?;
+        result.with_context(|| location(start_line))?;
         joined.clear();
         if eof {
             break;
         }
     }
     if short_faces > 0 {
-        eprintln!("Warning: omitted {short_faces} faces with fewer than three corners");
+        crate::say!("Warning: omitted {short_faces} faces with fewer than three corners");
     }
     for writer in &mut attrs {
         writer.flush()?;
@@ -382,7 +411,7 @@ pub fn spool(
         if let Some(def) = definitions.remove(&m.name) {
             *m = def;
         } else if m.name != "default" {
-            eprintln!("Warning: undefined material {}; using default", m.name);
+            undefined.add(&m.name);
         }
     }
     Ok(scene)

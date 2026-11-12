@@ -1,6 +1,6 @@
 //! Typed reads of a glTF accessor, without copying its data out of the mapped buffers.
 use super::{element, index, Gltf};
-use crate::shared::Res;
+use crate::shared::{failure::Context, Res};
 use serde_json::Value;
 use std::cmp::Ordering;
 pub struct Accessor<'a> {
@@ -64,8 +64,7 @@ impl<'a> Accessor<'a> {
         let sparse = match a.get("sparse") {
             None => None,
             Some(sparse) => Some(
-                Sparse::new(gltf, sparse, count, size)
-                    .map_err(|e| format!("Accessor {id}: {e}"))?,
+                Sparse::new(gltf, sparse, count, size).with_context(|| format!("Accessor {id}"))?,
             ),
         };
         Ok(Self {

@@ -7,6 +7,7 @@ use super::{
 };
 use crate::shared::{
     disk::{map, Outputs},
+    failure::Context,
     gltf::uri,
     Res,
 };
@@ -189,8 +190,8 @@ fn write_with_limit(
     };
     let quiet = options.quiet;
     if !quiet {
-        eprintln!("Origin: {}", format_triple(origin));
-        eprintln!(
+        crate::say!("Origin: {}", format_triple(origin));
+        crate::say!(
             "Bounds: {} (size {})",
             scene.bbox.range_str().unwrap_or_default(),
             scene.bbox.size_str().unwrap_or_default()
@@ -376,7 +377,7 @@ fn write_with_limit(
         }
         open = Some(p);
         if progress && face_count.is_multiple_of(1_000_000) {
-            eprintln!(
+            crate::say!(
                 "Converted {face_count} faces, {} binary bytes",
                 document.offset
             );
@@ -386,19 +387,19 @@ fn write_with_limit(
         document.close(p, &mut binary)?;
     }
     if splits > 0 {
-        eprintln!("Warning: {splits} primitives reached the {max_vertices}-vertex limit of 32-bit indices and were split");
+        crate::say!("Warning: {splits} primitives reached the {max_vertices}-vertex limit of 32-bit indices and were split");
     }
     if repaired_normals > 0 {
-        eprintln!("Warning: generated smooth normals for {repaired_normals} corners with zero-length source normals");
+        crate::say!("Warning: generated smooth normals for {repaired_normals} corners with zero-length source normals");
     }
     if textured_colors > 0 {
-        eprintln!("Warning: vertex colors on {textured_colors} textured faces are kept as _COLOR, which renderers ignore, since COLOR_0 would tint the texture a second time; use --no-color to drop them");
+        crate::say!("Warning: vertex colors on {textured_colors} textured faces are kept as _COLOR, which renderers ignore, since COLOR_0 would tint the texture a second time; use --no-color to drop them");
     }
     if skipped_degenerate > 0 {
-        eprintln!("Warning: skipped {skipped_degenerate} faces with zero area");
+        crate::say!("Warning: skipped {skipped_degenerate} faces with zero area");
     }
     if forced_polygons > 0 {
-        eprintln!("Warning: triangulated {forced_polygons} self-intersecting or otherwise non-simple faces by forced ear clipping; their triangles may overlap");
+        crate::say!("Warning: triangulated {forced_polygons} self-intersecting or otherwise non-simple faces by forced ear clipping; their triangles may overlap");
     }
     binary.flush()?;
     drop(binary);
@@ -406,7 +407,7 @@ fn write_with_limit(
         return Err("Input contains no supported triangle geometry".into());
     }
     if !center && !quiet {
-        eprintln!("Note: coordinates were encoded as float32 without recentering; use --center for georeferenced assets");
+        crate::say!("Note: coordinates were encoded as float32 without recentering; use --center for georeferenced assets");
     }
     let mut outputs = Outputs::default();
     let parent = output
@@ -438,16 +439,19 @@ fn write_with_limit(
         .collect();
     let transparent = transparency
         .join()
-        .map_err(|_| "Texture transparency scan panicked")??;
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))?;
     let mut material_ids = HashMap::new();
     let mut invisible = BTreeSet::new();
+    let mut invisible_names = crate::shared::diagnostics::Tally::new(
+        "fully transparent materials, which will be invisible (d 0 or Tr 1; check whether the exporter writes Tr as opacity)",
+    );
     for &(old_id, textured) in &used_materials {
         let m = &scene.materials[old_id];
         material_ids.insert((old_id, textured), materials.len());
         let mut blend = false;
         let texture = if let Some(path) = m.texture.as_ref().filter(|_| textured) {
-            let path =
-                fs::canonicalize(path).map_err(|e| format!("Texture {}: {e}", path.display()))?;
+            let path = fs::canonicalize(path)
+                .with_context(|| format!("Texture {}", crate::shared::diagnostics::shown(path)))?;
             let plan = &image_plans[&path];
             blend = transparent.contains(&path);
             let image = match image_ids.get(&path) {
@@ -480,7 +484,7 @@ fn write_with_limit(
         // writing `Tr` as opacity, and silently invisible objects would leave no clue why.
         // Glass (`illum 4`/`9`) keeps alpha 1, so `d 0` there, clear glass, is not flagged.
         if value["pbrMetallicRoughness"]["baseColorFactor"][3] == 0. && invisible.insert(old_id) {
-            eprintln!("Warning: material {} is fully transparent (d 0 or Tr 1) and will be invisible; check whether its exporter writes Tr as opacity", m.name);
+            invisible_names.add(&m.name);
         }
         if m.texture.is_some() && !textured {
             value["name"] = json!(format!("{}-untextured", m.name));
@@ -543,9 +547,9 @@ fn write_with_limit(
     drop(dst);
     outputs.commit();
     if !quiet {
-        eprintln!(
+        crate::say!(
             "Wrote {} ({face_count} faces, {} meshes, {} bytes of geometry)",
-            output.display(),
+            crate::shared::diagnostics::shown(output),
             root["meshes"].as_array().unwrap().len(),
             document.offset
         );
@@ -555,6 +559,7 @@ fn write_with_limit(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{import::material::Origin, shared::references::References};
     /// Primitive vertex counts after importing `obj` with a lowered vertex limit.
     fn import_with_limit(obj: &str, limit: u64) -> Vec<u64> {
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -574,7 +579,15 @@ mod tests {
             quiet: true,
             ..Default::default()
         };
-        let scene = obj::spool(&input, &dir, false, None, true).unwrap();
+        let scene = obj::spool(
+            &input,
+            &dir,
+            false,
+            &References::unrestricted(),
+            Origin::Model,
+            true,
+        )
+        .unwrap();
         write_with_limit(scene, &dir, &options, limit).unwrap();
         let root: Value = serde_json::from_slice(&fs::read(&output).unwrap()).unwrap();
         fs::remove_dir_all(&dir).unwrap();

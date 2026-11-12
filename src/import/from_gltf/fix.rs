@@ -301,7 +301,7 @@ pub fn meshes(
         return Err("Input contains no supported triangle geometry".into());
     }
     if degenerate > 0 {
-        eprintln!("Warning: skipped {degenerate} faces with zero area");
+        crate::say!("Warning: skipped {degenerate} faces with zero area");
     }
     Ok(geometry)
 }
@@ -365,12 +365,12 @@ pub fn normals(gltf: &Gltf, map: &mut Patches, output: &Output, kept: &[Kept]) -
         }
     }
     if repaired > 0 {
-        eprintln!(
+        crate::say!(
             "Warning: replaced {repaired} zero-length normals with the normal of a face using them"
         );
     }
     if quantized > 0 {
-        eprintln!(
+        crate::say!(
             "Warning: {quantized} quantized normals have zero length and were left as they are"
         );
     }
@@ -406,6 +406,7 @@ pub fn plan_images(
     let mut images = vec![Value::Null; ids.len()];
     let mut plans = Vec::new();
     let mut corrected = 0u64;
+    let mut composited = images::composited_tally();
     for (&old, &new) in &ids {
         let mut image = element(&gltf.root, "images", old)?.clone();
         let (path, embedded) = match gltf.image(old)? {
@@ -428,6 +429,7 @@ pub fn plan_images(
             &opts.input,
             &opts.output,
             workspace,
+            &mut composited,
         )?;
         if let Some(map) = image.as_object_mut() {
             map.remove("bufferView");
@@ -447,7 +449,7 @@ pub fn plan_images(
         plans.push(plan);
     }
     if corrected > 0 {
-        eprintln!("Warning: corrected the mimeType of {corrected} images to match their content");
+        crate::say!("Warning: corrected the mimeType of {corrected} images to match their content");
     }
     Ok((images, plans))
 }

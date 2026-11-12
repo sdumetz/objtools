@@ -1,5 +1,10 @@
 //! Conservative Phong -> PBR policy: no inferred metals, explicit specular extension.
-use crate::shared::Res;
+use crate::shared::{
+    diagnostics::{safe, shown, Tally},
+    failure::Context,
+    references::References,
+    Res,
+};
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
@@ -138,7 +143,7 @@ fn take_numbers(rest: &mut &str, option: &str, min: usize, max: usize) -> Res<Ve
         }
     }
     if values.len() < min {
-        return Err(format!("map_Kd {option} expects {min} number(s)").into());
+        return Err(format!("map_Kd {} expects {min} number(s)", safe(option)).into());
     }
     Ok(values)
 }
@@ -146,7 +151,12 @@ fn take_switch(rest: &mut &str, option: &str) -> Res<bool> {
     match take_token(rest) {
         "on" => Ok(true),
         "off" => Ok(false),
-        other => Err(format!("map_Kd {option} expects on or off, not {other:?}").into()),
+        other => Err(format!(
+            "map_Kd {} expects on or off, not {}",
+            safe(option),
+            safe(other)
+        )
+        .into()),
     }
 }
 /// Apply the options leading a `map_Kd` statement, the MTL spec's list for it plus a few that
@@ -206,7 +216,7 @@ fn texture_options<'a>(mut rest: &'a str, m: &mut Material) -> Res<(&'a str, Vec
             "-imfchan" => {
                 take_token(&mut rest);
             }
-            _ => return Err(format!("Unsupported map_Kd option {option}").into()),
+            _ => return Err(format!("Unsupported map_Kd option {}", safe(option)).into()),
         }
     }
 }
@@ -228,14 +238,40 @@ fn color(rest: &str) -> Res<[f64; 3]> {
         finite(v[2])?.clamp(0., 1.),
     ])
 }
+/// Shared by all the libraries of a model, as a file can name any number of them.
+pub struct Warnings {
+    properties: Tally,
+    options: Tally,
+}
+impl Warnings {
+    pub fn new() -> Self {
+        Self {
+            properties: Tally::new("unsupported MTL properties ignored"),
+            options: Tally::new("unsupported map_Kd options ignored"),
+        }
+    }
+}
+/// Whose an OBJ or MTL file is, which decides what its references and errors mean.
+#[derive(Clone, Copy)]
+pub enum Origin<'a> {
+    /// The model's own: its paths are relative to it, and its lines mean something to its author.
+    Model,
+    /// Generated in the workspace from `input`, whose folder its textures are relative to.
+    GeneratedFrom(&'a Path),
+}
 pub fn load(
     path: &Path,
-    texture_base: Option<&Path>,
+    references: &References,
+    origin: Origin,
     materials: &mut HashMap<String, Material>,
+    warnings: &mut Warnings,
 ) -> Res<()> {
-    let reader = BufReader::new(File::open(path).map_err(|e| format!("{}: {e}", path.display()))?);
+    let file = || match origin {
+        Origin::Model => shown(path),
+        Origin::GeneratedFrom(input) => shown(input),
+    };
+    let reader = BufReader::new(File::open(path).with_context(file)?);
     let mut current: Option<Material> = None;
-    let mut unsupported = std::collections::HashSet::new();
     for (line_no, line) in reader.lines().enumerate() {
         let line = line?;
         let line = line.split('#').next().unwrap().trim();
@@ -262,7 +298,7 @@ pub fn load(
                 "ni" => {
                     m.ior = finite(rest)?;
                     if m.ior < 1. {
-                        return Err("Ni must be >= 1".into());
+                        return Err("Ni must be at least 1".into());
                     }
                 }
                 "d" => {
@@ -278,11 +314,7 @@ pub fn load(
                 // `Kt` is an alias some exporters write, read by Blender too.
                 "tf" | "kt" => match color(rest) {
                     Ok(tf) => m.transmission_filter = Some(tf),
-                    Err(e) => {
-                        if unsupported.insert(key.to_owned()) {
-                            eprintln!("Warning: {key} ignored in {}: {e}", path.display());
-                        }
-                    }
+                    Err(_) => warnings.properties.add(written),
                 },
                 "pm" => m.metallic = finite(rest)?.clamp(0., 1.),
                 "objtools_doublesided" => m.double_sided = rest == "1",
@@ -290,30 +322,27 @@ pub fn load(
                 "map_kd" => {
                     let (rest, ignored) = texture_options(rest, m)?;
                     for option in ignored {
-                        if unsupported.insert(format!("map_Kd {option}")) {
-                            eprintln!("Warning: map_Kd {option} is ignored in {}", path.display());
-                        }
+                        warnings.options.add(option);
                     }
-                    let name = rest.trim_matches('"').replace('\\', "/");
-                    m.texture = Some(
-                        texture_base
-                            .unwrap_or_else(|| path.parent().unwrap_or(Path::new(".")))
-                            .join(name),
-                    );
+                    let name = rest.trim_matches('"');
+                    let beside = match origin {
+                        Origin::Model => path,
+                        Origin::GeneratedFrom(input) => input,
+                    };
+                    let base = beside.parent().unwrap_or(Path::new("."));
+                    let file = references.resolve(base, name);
+                    m.texture = Some(file.with_context(|| format!("Texture {}", safe(name)))?);
                 }
                 "" | "ka" => {}
-                _ => {
-                    if unsupported.insert(key.to_owned()) {
-                        eprintln!(
-                            "Warning: unsupported MTL property {written} in {}",
-                            path.display()
-                        );
-                    }
-                }
+                _ => warnings.properties.add(written),
             }
             Ok(())
         })();
-        result.map_err(|e| format!("{}:{}: {e}", path.display(), line_no + 1))?;
+        match origin {
+            Origin::Model => result.with_context(|| format!("{}:{}", shown(path), line_no + 1))?,
+            // The generated OBJ's own error already names the input.
+            Origin::GeneratedFrom(_) => result?,
+        }
     }
     if let Some(m) = current {
         materials.insert(m.name.clone(), m);
